@@ -1,0 +1,13 @@
+{
+  "contacts": [
+    { "name": "John Smith", "email": "john.smith@example.com", "group": "" },
+    { "name": "John Carter", "email": "john.carter@example.com", "group": "" },
+    { "name": "Sarah Lee", "email": "sarah.lee@example.com", "group": "team" },
+    { "name": "Alex Kim", "email": "alex.kim@example.com", "group": "team" },
+    { "name": "David Chen", "email": "david.chen@example.com", "group": "team" }
+  ],
+  "aliases": [
+    { "alias": "my manager", "contact": "Sarah Lee" },
+    { "alias": "my supervisor", "contact": "Sarah Lee" }
+  ]
+}

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+token.json
+credentials.json
+*.db
+outbox.jsonl
+.pytest_cache/
+attachments/
+test_attachments/
+test_outbox.jsonl

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Email Assistant</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main>
+    <span class="badge">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+        <line x1="12" y1="19" x2="12" y2="23"></line>
+      </svg>
+      Voice-first &middot; Audio-only
+    </span>
+
+    <h1>Voice Email Assistant</h1>
+
+    <!-- The ONE live region in the whole app (rule A2). Only a11y.js
+         writes to it, and only with brief state words — never the full
+         spoken content, which goes through speech synthesis only. -->
+    <div id="status" role="status" aria-live="polite">Loading&hellip;</div>
+
+    <div class="mic-row">
+      <button id="mic-btn" type="button" aria-pressed="false" data-state="idle">
+        Start listening
+      </button>
+    </div>
+
+    <div class="action-row">
+      <button id="readback-btn" type="button">Read it back again</button>
+      <button id="send-btn" type="button">Send</button>
+      <button id="cancel-btn" type="button">Cancel</button>
+      <button id="help-btn" type="button">Help</button>
+      <!-- F30: opening a real OS file picker needs a genuine, direct click
+           gesture — a voice turn's response arrives too late in the event
+           chain for the browser to honour fileInput.click(). This button
+           is always visible (rule A7 — a real <button>, never hidden) so
+           it works standalone; the "attach a file" voice command instead
+           points focus at it (see app.js's handling of focus_target). -->
+      <button id="attach-btn" type="button">Attach a file</button>
+    </div>
+
+    <input type="file" id="file-input" class="visually-hidden" aria-label="Choose a file to attach" />
+
+    <div class="rate-row">
+      <label for="rate-slider">Speaking rate</label>
+      <input type="range" id="rate-slider" min="0.75" max="1.5" step="0.05" value="1" />
+      <span id="rate-value">1.00x</span>
+    </div>
+
+    <section class="transcript-panel" aria-label="Conversation so far">
+      <h2>Conversation</h2>
+      <ol id="transcript-list"></ol>
+    </section>
+
+    <p class="note">
+      Tap the button, or press Tab then Enter, to start. After that, just
+      talk &mdash; the microphone reopens automatically after each
+      response, so the whole conversation works hands-free.
+    </p>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
