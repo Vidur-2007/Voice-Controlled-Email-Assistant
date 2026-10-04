@@ -71,6 +71,22 @@ export async function getHealth() {
 }
 
 /**
+ * GET /api/prefs (F45). Resolves with the saved prefs, or a default-rate
+ * fallback on failure — the rate slider must still work even if this call
+ * fails, just without persistence for that page load.
+ */
+export async function getPrefs() {
+  const data = await getJson("/api/prefs");
+  return data || { speech_rate: 1.0 };
+}
+
+/** POST /api/prefs (F45). Resolves with the (possibly clamped) saved value. */
+export async function setPrefs(speechRate) {
+  const data = await postJson("/api/prefs", { speech_rate: speechRate });
+  return data || { speech_rate: speechRate };
+}
+
+/**
  * POST /api/mail/attachment (F30). A File object can never flow through a
  * speech transcript, so this bypasses /api/turn entirely — always
  * resolves with a MailResult-shaped object, same never-throw contract as

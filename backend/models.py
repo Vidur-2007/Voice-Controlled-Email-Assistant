@@ -82,3 +82,11 @@ class ThreadContext(BaseModel):
 
     text: str
     last_message_id_header: Optional[str] = None  # RFC822 Message-Id, for In-Reply-To/References
+
+
+class Prefs(BaseModel):
+    """F45 — speech-rate persistence. Global, not per-session: this is a
+    single-user app, and F45 explicitly says "across sessions."
+    """
+
+    speech_rate: float = 1.0

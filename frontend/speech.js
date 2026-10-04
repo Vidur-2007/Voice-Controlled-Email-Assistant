@@ -186,6 +186,12 @@ function buildRecognition() {
       return; // normal — never an error tone or a spoken failure
     }
     // not-allowed, service-not-allowed, audio-capture, network: real errors.
+    // `active = false` here too, not just in onend — onend is a separate
+    // browser-dispatched event with no guaranteed-synchronous timing
+    // relative to onerror, and callbacks.onError() below (Phase 9) may
+    // synchronously check isListening() to decide whether to re-arm the
+    // wake word; it must see the engine as already stopped, not stale.
+    active = false;
     wantListening = false;
     clearAllTimers();
     finalBuffer = "";
@@ -215,14 +221,33 @@ export function startListening({ onInterim, onFinal, onError, onAutoStop, silenc
     (onError || (() => {}))({ type: "unsupported" });
     return;
   }
-  if (isListening()) return; // guard against InvalidStateError
 
-  callbacks = {
+  const nextCallbacks = {
     onInterim: onInterim || (() => {}),
     onFinal: onFinal || (() => {}),
     onError: onError || (() => {}),
     onAutoStop: onAutoStop || (() => {}),
   };
+
+  if (isListening()) {
+    // Phase 9 (wake word): retarget an already-running session instead of
+    // no-op'ing. Without this, a real mic tap while a passive wake-word
+    // session is listening would leave the engine running but still
+    // reporting to the OLD (wake-word) callbacks — the user's next words
+    // would silently get discarded as "not the wake phrase" instead of
+    // reaching the real turn they just asked to start. Restarting
+    // `recognition.start()` here instead would risk InvalidStateError and
+    // a real audio glitch; the engine itself doesn't need to change, only
+    // who's listening for its next result.
+    callbacks = nextCallbacks;
+    silenceStopMs = sMs || 0;
+    finalBuffer = "";
+    lastInterimText = "";
+    clearAllTimers();
+    return;
+  }
+
+  callbacks = nextCallbacks;
   silenceStopMs = sMs || 0;
   finalBuffer = "";
   lastInterimText = "";

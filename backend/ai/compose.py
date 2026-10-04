@@ -18,7 +18,7 @@ fills in (routes/voice.py calls it).
 """
 
 import re
-from typing import Literal
+from typing import Literal, Optional
 
 from backend.ai import prompts, provider
 from backend.ai.schemas import DraftFields
@@ -160,28 +160,44 @@ def _real_compose(transcript: str, mode: Mode) -> tuple[Draft, str]:
     return draft, fields.recipient_hint.strip()
 
 
-def compose_reply(instruction: str, thread_context: str) -> Draft:
+def compose_reply(instruction: str, thread_context: str, tone_hint: Optional[str] = None) -> Draft:
     """Phase 6 (F36/F41): fills in ONLY body/tone/length. Recipient,
     subject, thread_id, and in_reply_to are already set on the in-progress
     reply draft by routes/voice.py (from the inbox item being replied to)
     and must never be overwritten here — the caller merges this result's
     body/tone into that existing draft, keeping everything else as-is.
+
+    `tone_hint` is F42 (Phase 8) — a learned per-recipient tone from
+    `backend.data.prefs.get_tone_for_recipient()`. Unlike a fresh compose
+    (where the recipient isn't known until after composing, so F42 can
+    only override the Draft.tone field afterward), a reply's recipient IS
+    already known before this runs, so the hint can genuinely influence
+    the generated wording — honoured in both the fake and real paths, so
+    it's verifiable offline, not just a real-mode-only effect.
     """
     settings = get_settings()
     if settings.fake_ai:
-        return _fake_compose_reply(instruction)
-    return _real_compose_reply(instruction, thread_context)
+        return _fake_compose_reply(instruction, tone_hint)
+    return _real_compose_reply(instruction, thread_context, tone_hint)
 
 
-def _fake_compose_reply(instruction: str) -> Draft:
+def _fake_compose_reply(instruction: str, tone_hint: Optional[str]) -> Draft:
     body_source = instruction.strip()
     body = _sentence_case(body_source) if body_source else ""
-    return Draft(body=body, tone="neutral", length="normal")
+    return Draft(body=body, tone=tone_hint or "neutral", length="normal")
 
 
-def _real_compose_reply(instruction: str, thread_context: str) -> Draft:
+def _real_compose_reply(instruction: str, thread_context: str, tone_hint: Optional[str]) -> Draft:
     user = f"Original thread:\n{thread_context}\n\nReply instruction: {instruction}"
+    if tone_hint:
+        user += f"\n\nMatch this tone, since the user usually writes to this person this way: {tone_hint}."
     # DraftFields is reused rather than a new schema — recipient_hint and
     # subject are simply discarded below, never assigned onto the result.
     fields = provider.generate(prompts.SYSTEM_REPLY, user, DraftFields)
-    return Draft(body=fields.body.strip(), tone=fields.tone, length="normal")
+    # Forced, not just requested, when a hint exists — the same "command
+    # grammar decides WHICH edit, the model only rewords" philosophy
+    # FORCED_TONE already uses elsewhere in this codebase, so Draft.tone
+    # reliably reflects the applied default even if the model's own
+    # report drifts.
+    tone = tone_hint or fields.tone
+    return Draft(body=fields.body.strip(), tone=tone, length="normal")

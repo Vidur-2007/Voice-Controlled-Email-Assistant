@@ -33,6 +33,7 @@ from backend.commands import (
     parse_command,
 )
 from backend.data.contacts import increment_use_count, match_clarifying_answer, resolve_cc_hint, resolve_recipient
+from backend.data.prefs import get_tone_for_recipient, record_phrase, set_tone_for_recipient
 from backend.errors import SpokenError, to_spoken
 from backend.gmail.inbox import archive, get_thread_context, list_unread, mark_read
 from backend.gmail.schedule import parse_schedule_time, schedule_send
@@ -130,6 +131,45 @@ def _reply_subject(original_subject: str) -> str:
     if stripped.lower().startswith("re:"):
         return stripped
     return f"Re: {stripped}"
+
+
+def _apply_tone_default(draft: Draft, email: str) -> None:
+    """F42, fresh-compose fidelity: field-only (see the plan's "Applying
+    the default back has two different fidelities" note). Shared by every
+    place a recipient gets resolved for a fresh compose — the normal
+    fuzzy/alias/group path, the `clarifying` answer, AND the
+    `awaiting_address` escape-hatch fallback all need this, not just the
+    first one (a real gap live-testing caught: the fallback path resolves
+    plenty of real-world names a small seed contacts DB doesn't know yet).
+    Skipped for a group recipient (comma-joined emails).
+    """
+    if email and "," not in email:
+        stored_tone = get_tone_for_recipient(email)
+        if stored_tone:
+            draft.tone = stored_tone
+
+
+def _extract_opener(body: str) -> str:
+    lines = [line.strip() for line in body.split("\n") if line.strip()]
+    return lines[0] if lines else ""
+
+
+def _extract_signoff(body: str) -> str:
+    lines = [line.strip() for line in body.split("\n") if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def _record_personalisation_on_send(draft: Draft) -> None:
+    """F42/F44: called on SEND success, before reset_session() wipes the
+    draft. Skipped for a group recipient (comma-joined addresses) — no
+    single tone_history row to key by. F44 is bookkeeping only (your
+    choice, Phase 8 plan): record_phrase() never feeds back into a
+    generated email anywhere in this app.
+    """
+    if "," not in draft.recipient:
+        set_tone_for_recipient(draft.recipient, draft.tone)
+    record_phrase(_extract_opener(draft.body))
+    record_phrase(_extract_signoff(draft.body))
 
 
 def _try_mark_read(message_id: str) -> None:
@@ -252,6 +292,7 @@ def _compose_and_readback(state: ConversationState, transcript: str, mode: str) 
     # resolved (alias, group, or a clean fuzzy winner)
     state.draft.recipient_name = result.name
     state.draft.recipient = result.email
+    _apply_tone_default(state.draft, result.email)
     state.phase = "awaiting_confirm"
     return _respond(state, build_readback(state.draft))
 
@@ -326,6 +367,7 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
             return _respond(state, _SEND_TOO_EARLY)
         result = send_email(state.draft)
         if result.success:
+            _record_personalisation_on_send(state.draft)
             reset_session(session_id)
             state = get_session(session_id)
         return _respond(state, result.message, ok=result.success)
@@ -476,6 +518,11 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
             thread_id=item.thread_id,
             in_reply_to=context.last_message_id_header,
         )
+        # F42: the recipient IS known already for a reply (unlike a fresh
+        # compose), so this pre-set carries all the way into compose_reply()
+        # below once the user says what to write — see the "review" phase
+        # branch in _handle_turn.
+        _apply_tone_default(state.draft, item.sender_email)
         state.phase = "review"
         who = item.sender_name or speakable_email(item.sender_email) or "them"
         return _respond(state, f"Replying to {who}. {_ASK_REPLY_CONTENT}")
@@ -583,6 +630,7 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
         increment_use_count(matched.email)
         state.draft.recipient_name = matched.name
         state.draft.recipient = matched.email
+        _apply_tone_default(state.draft, matched.email)
         state.candidates = []
         state.clarifying_hint = ""
         state.phase = "awaiting_confirm"
@@ -592,6 +640,7 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
         recipient_name, recipient = _resolve_recipient_stub(transcript)
         state.draft.recipient_name = recipient_name
         state.draft.recipient = recipient
+        _apply_tone_default(state.draft, recipient)
         state.phase = "awaiting_confirm"
         return _respond(state, build_readback(state.draft))
 
@@ -608,7 +657,11 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
         # and a reply's body starts empty, so that would produce nonsense.
         try:
             thread_text = get_thread_context(state.draft.thread_id or "").text
-            reply_draft = compose_reply(transcript, thread_text)
+            # Only a REAL learned default counts as a hint — "neutral" is
+            # also the Draft model's own untouched default, so passing it
+            # through would be indistinguishable from "no hint" anyway.
+            tone_hint = state.draft.tone if state.draft.tone != "neutral" else None
+            reply_draft = compose_reply(transcript, thread_text, tone_hint=tone_hint)
         except Exception as exc:  # noqa: BLE001
             return _respond(state, to_spoken(exc), ok=False)
         state.draft.body = reply_draft.body

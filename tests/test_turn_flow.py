@@ -421,3 +421,133 @@ def test_cc_attach_schedule_all_refused_outside_awaiting_confirm(client):
         b = r.json()
         _assert_speech_is_clean(b["speech"])
         assert "only available" in b["speech"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — F42 (tone learning) and F44 (frequent phrases, bookkeeping only)
+# ---------------------------------------------------------------------------
+
+
+def test_tone_learned_on_send_defaults_on_next_fresh_compose_to_same_recipient(client):
+    session_id = "flow-tone-fresh"
+
+    client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell John Smith I will be late"}
+    )
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "make it formal"})
+    r1 = client.post("/api/turn", json={"session_id": session_id, "transcript": "send"})
+    assert r1.json()["ok"] is True
+
+    # A second, fresh email to the SAME recipient — no tone command this
+    # time — should default to "formal" purely from tone_history.
+    r2 = client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell John Smith the report is ready"}
+    )
+    b2 = r2.json()
+    _assert_speech_is_clean(b2["speech"])
+    assert b2["phase"] == "awaiting_confirm"
+    assert b2["draft"]["tone"] == "formal"
+
+
+def test_tone_learned_applies_via_the_awaiting_address_fallback_too(client):
+    """Regression test: a recipient resolved through the F16 escape hatch
+    (an unrecognized name, _resolve_recipient_stub) must get the F42
+    default too, not just names that resolve through the normal fuzzy/
+    alias path — live testing caught this gap (the automated test above
+    used a seeded contact, which masked it).
+    """
+    session_id = "flow-tone-awaiting-address"
+
+    r0 = client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell Zorblax I will be late"}
+    )
+    assert r0.json()["phase"] == "awaiting_address"
+    r1 = client.post("/api/turn", json={"session_id": session_id, "transcript": "Zorblax"})
+    assert r1.json()["phase"] == "awaiting_confirm"
+
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "make it formal"})
+    r2 = client.post("/api/turn", json={"session_id": session_id, "transcript": "send"})
+    assert r2.json()["ok"] is True
+
+    r3 = client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell Zorblax the report is ready"}
+    )
+    r4 = client.post("/api/turn", json={"session_id": session_id, "transcript": "Zorblax"})
+    b4 = r4.json()
+    _assert_speech_is_clean(b4["speech"])
+    assert b4["phase"] == "awaiting_confirm"
+    assert b4["draft"]["tone"] == "formal"
+
+
+def test_tone_learned_applies_to_reply_content_under_fake_ai(client):
+    """Unlike a fresh compose, a reply's recipient is known before
+    composing, so the learned tone can genuinely reach the generated
+    content — verifiable offline since _fake_compose_reply honours the
+    hint too, not just the real path.
+    """
+    session_id = "flow-tone-reply"
+
+    # Seed tone_history for David Chen (the fake inbox's 2nd message).
+    client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell David Chen I will be late"}
+    )
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "make it formal"})
+    r1 = client.post("/api/turn", json={"session_id": session_id, "transcript": "send"})
+    assert r1.json()["ok"] is True
+
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "read my unread mail"})
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "next email"})  # David Chen
+    r2 = client.post("/api/turn", json={"session_id": session_id, "transcript": "reply"})
+    assert r2.json()["phase"] == "review"
+    assert r2.json()["draft"]["tone"] == "formal"  # pre-set before the user even says what to write
+
+    r3 = client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "sounds good, see you then"}
+    )
+    b3 = r3.json()
+    _assert_speech_is_clean(b3["speech"])
+    assert b3["phase"] == "awaiting_confirm"
+    assert b3["draft"]["tone"] == "formal"
+
+
+def test_frequent_phrases_bookkeeping_without_auto_insertion(client):
+    from backend.data.prefs import top_phrases
+
+    session_id = "flow-phrases"
+
+    # Two sends sharing the same sign-off line (via "new paragraph" to get
+    # a real multi-line body) should increment the SAME phrase's use_count.
+    client.post(
+        "/api/turn",
+        json={
+            "session_id": session_id,
+            "transcript": "tell John Smith thanks for your help new paragraph best regards",
+        },
+    )
+    r1 = client.post("/api/turn", json={"session_id": session_id, "transcript": "send"})
+    assert r1.json()["ok"] is True
+
+    client.post(
+        "/api/turn",
+        json={
+            "session_id": session_id,
+            "transcript": "tell Sarah Lee here's the update new paragraph best regards",
+        },
+    )
+    r2 = client.post("/api/turn", json={"session_id": session_id, "transcript": "send"})
+    assert r2.json()["ok"] is True
+
+    # Lowercase "best regards." not "Best regards." — _sentence_case() only
+    # capitalizes the very first character of the whole fake-composed body,
+    # before the "new paragraph" substitution splits it in two; cosmetic
+    # only (TTS doesn't care about capitalization), not fixed here.
+    phrases = dict(top_phrases(limit=10))
+    assert phrases.get("best regards.") == 2
+
+    # Bookkeeping only (your explicit choice) — a THIRD, unrelated fresh
+    # compose must never have "best regards" inserted into it automatically.
+    r3 = client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell John Smith the report is ready"}
+    )
+    b3 = r3.json()
+    assert "best regards" not in b3["draft"]["body"].lower()

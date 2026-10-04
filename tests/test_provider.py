@@ -67,7 +67,7 @@ def test_generate_gives_up_after_second_failure(monkeypatch):
     _install_queue(monkeypatch, ["still not json", "still not json"])
     with pytest.raises(SpokenError) as exc_info:
         provider.generate("system", "user", _Field)
-    assert exc_info.value.message == "I couldn't write that properly. Could you say it again?"
+    assert exc_info.value.message == "I couldn't write that properly, so nothing was sent. Could you say it again?"
 
 
 def test_generate_speaks_ollama_not_running(monkeypatch):
@@ -83,4 +83,4 @@ def test_generate_speaks_generic_ollama_error(monkeypatch):
     _install_queue(monkeypatch, [ResponseError("boom", 500)])
     with pytest.raises(SpokenError) as exc_info:
         provider.generate("system", "user", _Field)
-    assert exc_info.value.message == "The writing assistant ran into a problem. Say it again in a moment."
+    assert exc_info.value.message == "The writing assistant ran into a problem, so nothing was sent. Say it again in a moment."

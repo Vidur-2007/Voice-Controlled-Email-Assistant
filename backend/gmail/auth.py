@@ -47,8 +47,13 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
 ]
 
+# Phase 8 accessibility audit: this is the message a real user actually
+# hears for the "no credentials.json" §30 row — raised directly as a
+# SpokenError, which bypasses errors.py's _PATTERNS table entirely
+# (to_spoken() returns a SpokenError's own .message verbatim). Tightened
+# with the same explicit "so nothing was sent" clause as errors.py's copy.
 _NO_CREDENTIALS_FILE_MESSAGE = (
-    "I can't send mail yet because the email credentials file is missing."
+    "I can't send mail yet because the email credentials file is missing, so nothing was sent."
 )
 
 

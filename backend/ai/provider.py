@@ -26,16 +26,27 @@ T = TypeVar("T", bound=BaseModel)
 
 _SCHEMA_RESTATE_TEMPLATE = "\n\nReply with JSON matching this exact schema and nothing else:\n{schema}"
 
-_RETRY_FAILED_MESSAGE = "I couldn't write that properly. Could you say it again?"
+# Phase 8 accessibility audit: these are the messages real users actually
+# hear for the §30 "missing model API key"/"model rate limit" rows — every
+# real failure path here is wrapped in its own SpokenError before it would
+# ever reach errors.py's _PATTERNS table (to_spoken() checks `isinstance(exc,
+# SpokenError)` first and returns .message directly), so _PATTERNS' "api
+# key"/"rate limit" entries never actually fire in this app as it runs.
+# Each message below gained an explicit "so nothing was sent" clause, for
+# the same §30-closing-rule reason _PATTERNS' messages did.
+_RETRY_FAILED_MESSAGE = "I couldn't write that properly, so nothing was sent. Could you say it again?"
 _OLLAMA_NOT_RUNNING_MESSAGE = (
     "I can't write the email right now because Ollama isn't running on this "
-    "computer. Start Ollama and try again."
+    "computer, so nothing was sent. Start Ollama and try again."
 )
-_OLLAMA_ERROR_MESSAGE = "The writing assistant ran into a problem. Say it again in a moment."
-_OLLAMA_TIMEOUT_MESSAGE = "That's taking too long to write. Say it again, or try a shorter instruction."
+_OLLAMA_ERROR_MESSAGE = "The writing assistant ran into a problem, so nothing was sent. Say it again in a moment."
+_OLLAMA_TIMEOUT_MESSAGE = (
+    "That's taking too long to write, so nothing has been sent yet. Say it again, "
+    "or try a shorter instruction."
+)
 _GEMINI_NOT_SET_UP_MESSAGE = (
-    "The online writing assistant isn't set up yet. Add a Gemini key to use it, "
-    "or switch back to the local one."
+    "The online writing assistant isn't set up yet, so nothing was sent. Add a "
+    "Gemini key to use it, or switch back to the local one."
 )
 
 

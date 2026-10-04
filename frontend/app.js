@@ -7,6 +7,13 @@
 // speak-while-listening. Otherwise the app transcribes its own voice and
 // loops forever.
 //
+// Phase 9 (F11, wake word) raised the stakes on this rule: setState("idle")
+// can now itself reopen the mic (for passive wake-word listening, via the
+// centralized hook in setState() below), so it's no longer just a cosmetic
+// button-text update — every path that both speaks AND settles to "idle"
+// must call setState("idle") AFTER its tts.speak() resolves, never before
+// (see handleSttError()/handleAutoStop()/onWakeWordToggle() for the pattern).
+//
 // Turn-taking is hands-free after the first tap: TurnResponse.listen_again
 // tells us to reopen the mic right after speaking each response, so a
 // whole conversation (readback -> "send" -> confirmation) needs only the
@@ -30,6 +37,23 @@ let turnGeneration = 0;
 let silenceStopMs = 0;
 let sttSupported = true;
 let ttsSupported = true;
+
+// Phase 9 (F11, stretch) — opt-in, off by default. Deliberately NOT a 5th
+// value on `state`: wake-mode is an orthogonal flag layered on top of the
+// existing idle/listening/processing/speaking machinery, armed only while
+// state is genuinely "idle" (see maybeArmWakeWord()), so none of the
+// existing turnGeneration/conversationActive race-guard logic for a real
+// turn needs to change.
+let wakeWordEnabled = false;
+const WAKE_PHRASE = "hey ultron";
+const WAKE_WORD_ON_MESSAGE =
+  "Wake word on. From now on, say 'hey ultron' anytime to start talking, even without " +
+  "tapping the button — your microphone will stay on and keep listening for that phrase " +
+  "while the app is otherwise idle, and what it hears gets sent to your browser's speech " +
+  "service the same way it already does when you're actively using the app. Say 'hey " +
+  "ultron' on its own to start listening, or say 'hey ultron' followed by what you want " +
+  "to do. Tap this button again to turn it off.";
+const WAKE_WORD_OFF_MESSAGE = "Wake word off. Your microphone only listens when you tap the button.";
 
 let els = {};
 
@@ -67,6 +91,116 @@ function updateMicButton() {
 function setState(next) {
   state = next;
   updateMicButton();
+  // Centralized, not sprinkled at every call site — every place that
+  // settles into "idle" (end of a turn, Escape, an STT error, auto-stop,
+  // a finished attachment upload, a manual stop with nothing said) should
+  // resume passive wake-word listening the same way, and a single hook
+  // here can't be missed the way scattering the call across every site
+  // that calls setState("idle") could be.
+  if (next === "idle") maybeArmWakeWord();
+}
+
+function maybeArmWakeWord() {
+  if (wakeWordEnabled && state === "idle" && !speech.isListening()) {
+    beginWakeListening();
+  }
+}
+
+function beginWakeListening() {
+  // Silent arm — no start cue, no "Listening…" announcement. This re-arms
+  // every time the engine naturally restarts (Chrome's continuous mode
+  // still finalizes on pauses), so cueing every cycle would be constant
+  // noise; the only audible moment is actual detection, in
+  // handleWakeWordTranscript() below.
+  speech.startListening({
+    onInterim: () => {},
+    onFinal: handleWakeWordTranscript,
+    onError: handleSttError,
+    onAutoStop: () => {},
+    silenceStopMs: 0,
+  });
+}
+
+function handleWakeWordTranscript(text) {
+  if (!wakeWordEnabled) return; // turned off mid-utterance — see onWakeWordToggle()
+
+  const low = text.toLowerCase();
+  const idx = low.indexOf(WAKE_PHRASE);
+  if (idx === -1) {
+    // Ambient speech, not the wake phrase — total silence: no cue, no
+    // announcement, no transcript entry, nothing sent anywhere. Just
+    // re-arm and keep waiting.
+    beginWakeListening();
+    return;
+  }
+
+  cues.playWake();
+  a11y.announce("Heard you.");
+
+  const remainder = (text.slice(0, idx) + text.slice(idx + WAKE_PHRASE.length)).trim();
+  if (remainder) {
+    // One breath ("hey ultron tell John I'll be late") — skip straight to
+    // a real turn, exactly as if the user had already tapped and spoken.
+    logTurn("you", remainder);
+    conversationActive = true;
+    runTurn(remainder);
+  } else {
+    // The phrase alone — behave exactly like a mic tap.
+    conversationActive = true;
+    beginListening();
+  }
+}
+
+function updateWakeWordButton() {
+  const btn = els.wakeWordBtn;
+  if (!btn) return;
+  btn.setAttribute("aria-pressed", wakeWordEnabled ? "true" : "false");
+  btn.textContent = wakeWordEnabled ? "Disable wake word" : "Enable wake word";
+}
+
+async function onWakeWordToggle() {
+  cues.primeAudio();
+  // Same interrupt discipline as every other button (submitCommand()) —
+  // tapping this is a barge-in if a real turn happens to be mid-flight,
+  // not just a background flag flip: speaking the (long, first-time-on)
+  // disclosure while the mic is still actively capturing a real command
+  // would double up two things talking into/out of the same audio path.
+  turnGeneration += 1;
+  const myGeneration = turnGeneration;
+
+  // Flip the flag BEFORE stopping anything: speech.stopListening() below
+  // can synchronously flush a partial, mid-utterance wake-mode buffer
+  // straight through handleWakeWordTranscript() (its existing callback
+  // target) — that function's own "already disabled?" guard must see the
+  // NEW value at that exact synchronous moment, or disabling while
+  // mid-utterance would silently re-arm itself right back on.
+  wakeWordEnabled = !wakeWordEnabled;
+  updateWakeWordButton();
+
+  speech.stopListening();
+  tts.stopSpeaking();
+  cues.stopWorkingLoop();
+
+  // Set state directly, NOT via setState("idle") — that would trigger the
+  // centralized maybeArmWakeWord() hook and reopen the mic BEFORE the
+  // disclosure below is spoken, violating the one rule every other path
+  // in this file follows: the mic stays closed until speech finishes, or
+  // the app risks hearing (and misreading) its own voice.
+  state = "idle";
+  updateMicButton();
+
+  if (wakeWordEnabled) {
+    a11y.announce("Wake word on.");
+    logTurn("assistant", WAKE_WORD_ON_MESSAGE);
+    if (ttsSupported) await tts.speak(WAKE_WORD_ON_MESSAGE);
+  } else {
+    a11y.announce("Wake word off.");
+    logTurn("assistant", WAKE_WORD_OFF_MESSAGE);
+    if (ttsSupported) await tts.speak(WAKE_WORD_OFF_MESSAGE);
+  }
+  if (myGeneration !== turnGeneration) return; // superseded while speaking
+
+  maybeArmWakeWord();
 }
 
 function beginListening() {
@@ -201,18 +335,29 @@ function handleSttError({ type }) {
   turnGeneration += 1;
   conversationActive = false;
   cues.playError();
-  setState("idle");
   a11y.announce("Error.");
   const message = STT_ERROR_MESSAGES[type] || "Something went wrong with listening. Please try again.";
-  if (ttsSupported) tts.speak(message);
+  // setState("idle") moved to AFTER speaking (was before) — Phase 9: that
+  // call now has a real side effect (it can reopen the mic for passive
+  // wake-word listening via the centralized hook), not just a cosmetic
+  // button-text update, so it must wait until the error message has
+  // actually finished, same as the top-of-file "mic closed until speech
+  // finishes" rule every other path here already follows.
+  if (ttsSupported) {
+    tts.speak(message).then(() => setState("idle"));
+  } else {
+    setState("idle");
+  }
 }
 
 async function handleAutoStop() {
   // F10 — disabled by default (silenceStopMs=0); only reachable if enabled.
   cues.playStop();
-  setState("idle");
   a11y.announce("Paused.");
   await tts.speak("I stopped listening because it went quiet. Say 'keep going' to add more.");
+  // setState("idle") moved to AFTER speaking — same Phase 9 reasoning as
+  // handleSttError() above.
+  setState("idle");
   if (conversationActive) beginListening();
 }
 
@@ -263,10 +408,17 @@ function onKeydown(event) {
 
 function wireRateSlider() {
   if (!els.rate) return;
+  // "input" fires continuously while dragging — live preview only, no
+  // network call per pixel of drag. "change" fires once on release — that
+  // one persists via setPrefs (F45). Both update tts.setRate()/the label;
+  // only "change" also saves.
   els.rate.addEventListener("input", () => {
     const value = parseFloat(els.rate.value);
     tts.setRate(value);
     if (els.rateValue) els.rateValue.textContent = value.toFixed(2) + "x";
+  });
+  els.rate.addEventListener("change", () => {
+    api.setPrefs(parseFloat(els.rate.value));
   });
 }
 
@@ -281,6 +433,7 @@ async function init() {
     help: document.getElementById("help-btn"),
     attachBtn: document.getElementById("attach-btn"),
     fileInput: document.getElementById("file-input"),
+    wakeWordBtn: document.getElementById("wake-word-btn"),
     rate: document.getElementById("rate-slider"),
     rateValue: document.getElementById("rate-value"),
     transcriptList: document.getElementById("transcript-list"),
@@ -305,11 +458,21 @@ async function init() {
     });
     els.fileInput.addEventListener("change", handleFileSelected);
   }
+  if (els.wakeWordBtn) els.wakeWordBtn.addEventListener("click", onWakeWordToggle);
   document.addEventListener("keydown", onKeydown);
   wireRateSlider();
 
   const health = await api.getHealth();
   silenceStopMs = (health && health.silence_stop_ms) || 0;
+
+  // F45: apply the saved rate before anything speaks, so even the very
+  // first "Ready." utterance uses it, not a one-utterance-late correction.
+  const prefs = await api.getPrefs();
+  if (prefs && typeof prefs.speech_rate === "number") {
+    tts.setRate(prefs.speech_rate);
+    if (els.rate) els.rate.value = String(prefs.speech_rate);
+    if (els.rateValue) els.rateValue.textContent = prefs.speech_rate.toFixed(2) + "x";
+  }
 
   updateMicButton();
 

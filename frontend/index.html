@@ -42,6 +42,12 @@
            it works standalone; the "attach a file" voice command instead
            points focus at it (see app.js's handling of focus_target). -->
       <button id="attach-btn" type="button">Attach a file</button>
+      <!-- F11 (Phase 9, stretch): opt-in, off by default — enabling this
+           means the microphone stays on and keeps sending audio to the
+           browser's speech service even while the app is otherwise idle,
+           which is disclosed in full the first time it's turned on (see
+           app.js's wake-word toggle handler). -->
+      <button id="wake-word-btn" type="button" aria-pressed="false">Enable wake word</button>
     </div>
 
     <input type="file" id="file-input" class="visually-hidden" aria-label="Choose a file to attach" />

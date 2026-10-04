@@ -196,7 +196,7 @@ def test_real_send_maps_403_to_permission_message(monkeypatch):
     result = send._real_send(_draft())
     assert result.success is False
     assert result.message == (
-        "Your email account refused the request. It may not have granted permission to send mail."
+        "Your email account refused the request, so nothing was sent. It may not have granted permission to send mail."
     )
 
 
@@ -204,14 +204,14 @@ def test_real_send_maps_429_to_busy_message(monkeypatch):
     monkeypatch.setattr(send, "_build_service", lambda: _FailingService(_http_error(429)))
     result = send._real_send(_draft())
     assert result.success is False
-    assert result.message == "Your email provider is busy right now. Say 'send' once more to try again."
+    assert result.message == "Your email provider is busy right now, so nothing was sent. Say 'send' once more to try again."
 
 
 def test_real_save_draft_maps_500_to_busy_message(monkeypatch):
     monkeypatch.setattr(send, "_build_service", lambda: _FailingService(_http_error(500)))
     result = send._real_save_draft(_draft())
     assert result.success is False
-    assert result.message == "Your email provider is busy right now. Say 'send' once more to try again."
+    assert result.message == "Your email provider is busy right now, so nothing was sent. Say 'send' once more to try again."
 
 
 def test_real_send_invalid_recipient_never_calls_the_service(monkeypatch):
@@ -262,7 +262,7 @@ def test_missing_credentials_file_raises_spoken_error(monkeypatch, tmp_path):
     with pytest.raises(SpokenError) as exc_info:
         auth._run_interactive_flow()
     assert exc_info.value.message == (
-        "I can't send mail yet because the email credentials file is missing."
+        "I can't send mail yet because the email credentials file is missing, so nothing was sent."
     )
 
 

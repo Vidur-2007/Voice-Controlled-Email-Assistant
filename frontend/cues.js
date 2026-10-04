@@ -4,6 +4,7 @@
 //   stop beep     — 660 Hz, short          — listening has stopped
 //   error tone    — 220 Hz, longer, lower  — something genuinely went wrong
 //   working chime — 520/660 Hz two-blip    — a slow operation is still running (A14)
+//   wake chime    — 740 Hz quick two-blip  — the wake phrase was heard (Phase 9, F11)
 //
 // The AudioContext MUST be created inside a user-gesture handler, not at
 // module load — otherwise the browser suspends it and every cue is
@@ -63,6 +64,16 @@ export function playStop() {
 export function playError() {
   // Longer and lower, per spec — must be identifiable by ear alone.
   tone(220, 450, 0.22);
+}
+
+export function playWake() {
+  // Phase 9 (F11) — a new, distinct event type (A3: "the app heard its
+  // wake phrase" is not the same event as "listening has begun", so it
+  // doesn't reuse playStart()). Quicker and higher than the working
+  // chime (90ms apart vs. 130ms, 740 Hz vs. 520/660) so the two are never
+  // confused by ear even though both are two-blip patterns.
+  tone(740, 80, 0.16);
+  setTimeout(() => tone(740, 80, 0.16), 90);
 }
 
 function playWorking() {
