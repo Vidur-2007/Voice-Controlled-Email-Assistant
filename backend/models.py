@@ -29,6 +29,7 @@ class Draft(BaseModel):
     cc: list[str] = Field(default_factory=list)
     cc_names: list[str] = Field(default_factory=list)  # human names, for speaking aloud (F29)
     bcc: list[str] = Field(default_factory=list)
+    bcc_names: list[str] = Field(default_factory=list)  # human names, for speaking aloud (F29)
     attachments: list[str] = Field(default_factory=list)
     tone: Tone = "neutral"
     length: Length = "normal"
@@ -82,6 +83,8 @@ class ThreadContext(BaseModel):
 
     text: str
     last_message_id_header: Optional[str] = None  # RFC822 Message-Id, for In-Reply-To/References
+    to_recipients: list[str] = Field(default_factory=list)  # F36 reply-all: last message's To
+    cc_recipients: list[str] = Field(default_factory=list)  # F36 reply-all: last message's Cc
 
 
 class Prefs(BaseModel):
@@ -90,3 +93,20 @@ class Prefs(BaseModel):
     """
 
     speech_rate: float = 1.0
+
+
+class DraftComposeRequest(BaseModel):
+    """POST /api/draft/compose (§21) — direct access for testing without
+    the frontend/session machinery. `mode` is optional; when omitted,
+    routes/draft.py falls back to mode_detect.detect_mode().
+    """
+
+    transcript: str
+    mode: Optional[Literal["dictation", "brief"]] = None
+
+
+class DraftEditRequest(BaseModel):
+    """POST /api/draft/edit (§21) — same direct-access pattern."""
+
+    draft: Draft
+    instruction: str

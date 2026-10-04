@@ -1,6 +1,6 @@
 import pytest
 
-from backend.commands import help_speech, match_cc_trigger, match_schedule_trigger, parse_command
+from backend.commands import help_speech, match_bcc_trigger, match_cc_trigger, match_schedule_trigger, parse_command
 
 
 @pytest.mark.parametrize(
@@ -169,6 +169,55 @@ def test_match_cc_trigger_no_match_returns_none():
 )
 def test_match_schedule_trigger_extracts_phrase(transcript, expected_phrase):
     assert match_schedule_trigger(transcript) == expected_phrase
+
+
+# ---------------------------------------------------------------------------
+# Completeness pass: ADD_BCC, KEEP_GOING, REPLY_ALL, FORWARD
+# ---------------------------------------------------------------------------
+
+
+def test_add_bcc_bare_phrase():
+    assert parse_command("add bcc") == "ADD_BCC"
+
+
+def test_keep_going_phrase():
+    assert parse_command("keep going") == "KEEP_GOING"
+
+
+@pytest.mark.parametrize("phrase", ["reply all", "reply to everyone", "reply all to this"])
+def test_reply_all_phrases(phrase):
+    assert parse_command(phrase) == "REPLY_ALL"
+
+
+@pytest.mark.parametrize("phrase", ["forward this", "forward this email", "forward it"])
+def test_forward_phrases(phrase):
+    assert parse_command(phrase) == "FORWARD"
+
+
+@pytest.mark.parametrize(
+    ("transcript", "expected_hint"),
+    [
+        ("add bcc Sarah", "Sarah"),
+        ("bcc Sarah", "Sarah"),
+    ],
+)
+def test_match_bcc_trigger_extracts_hint(transcript, expected_hint):
+    assert match_bcc_trigger(transcript) == expected_hint
+
+
+def test_match_bcc_trigger_bare_add_bcc_returns_none():
+    assert match_bcc_trigger("add bcc") is None
+
+
+def test_match_bcc_trigger_no_match_returns_none():
+    assert match_bcc_trigger("tell John I will be late") is None
+
+
+def test_bcc_and_cc_triggers_never_collide():
+    # "bcc Sarah" must never be mistaken for a CC trigger, and vice versa.
+    assert match_cc_trigger("bcc Sarah") is None
+    assert match_bcc_trigger("cc Sarah") is None
+    assert match_bcc_trigger("copy in Sarah") is None
 
 
 def test_match_schedule_trigger_no_match_returns_none():

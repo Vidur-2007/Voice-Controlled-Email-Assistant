@@ -7,7 +7,10 @@ change. There is no visual email client here; the on-screen transcript log is a
 convenience for sighted developers, not the primary interface.
 
 Built in phases against `PROJECT_BUILD_SPEC.md`, which remains the authoritative design
-reference for anyone extending this project.
+reference for anyone extending this project. Every feature in the spec (F1–F51) has been
+audited against the live codebase, not just assumed built from memory — F51 (a spoken
+PIN, Phase 9's other optional stretch goal) is the one deliberately not built; everything
+else, including reply-all/forward and BCC by voice, is implemented and tested.
 
 ## Quick start
 
@@ -43,7 +46,7 @@ setup below and set `FAKE_GMAIL=0`.
 pytest -q
 ```
 
-272 tests, all offline — **no test may make a network call** (enforced by `tests/
+305 tests, all offline — **no test may make a network call** (enforced by `tests/
 conftest.py` forcing `FAKE_AI=1`/`FAKE_GMAIL=1`/an in-memory database before any
 `backend` import happens).
 

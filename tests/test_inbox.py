@@ -3,7 +3,7 @@ conftest.py) — no real Gmail API call, no network access anywhere.
 """
 
 from backend.gmail import fake
-from backend.gmail.inbox import _extract_plain_text
+from backend.gmail.inbox import _extract_plain_text, _parse_addresses, get_my_email
 
 FORBIDDEN_SUBSTRINGS = ["{", "}", "None", "null", "Traceback"]
 
@@ -267,3 +267,33 @@ def test_read_full_message(client):
     body = r.json()
     _assert_speech_is_clean(body["speech"])
     assert len(body["speech"]) > len("From Priya Nair.")
+
+
+# ---------------------------------------------------------------------------
+# Completeness pass (F36 reply-all): _parse_addresses, get_my_email
+# ---------------------------------------------------------------------------
+
+
+def test_parse_addresses_handles_plain_list():
+    addrs = _parse_addresses("Alex Kim <alex.kim@example.com>, David Chen <david.chen@example.com>")
+    assert addrs == ["alex.kim@example.com", "david.chen@example.com"]
+
+
+def test_parse_addresses_handles_quoted_comma_in_display_name():
+    # Verified via the Plan agent directly against the installed stdlib —
+    # a naive .split(",") would wrongly produce 3 pieces here, not 2.
+    addrs = _parse_addresses('"Kim, Alex" <alex.kim@example.com>, David Chen <david.chen@example.com>')
+    assert addrs == ["alex.kim@example.com", "david.chen@example.com"]
+
+
+def test_parse_addresses_handles_bare_address_with_no_display_name():
+    addrs = _parse_addresses("alex.kim@example.com, David Chen <david.chen@example.com>")
+    assert addrs == ["alex.kim@example.com", "david.chen@example.com"]
+
+
+def test_parse_addresses_empty_header_returns_empty_list():
+    assert _parse_addresses("") == []
+
+
+def test_get_my_email_fake_mode_returns_fixed_address():
+    assert get_my_email() == "me@example.com"

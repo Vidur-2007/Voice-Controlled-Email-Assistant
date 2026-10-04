@@ -1,5 +1,7 @@
 """A full scripted conversation through /api/turn (§29's required test)."""
 
+import pytest
+
 FORBIDDEN_SUBSTRINGS = ["{", "}", "None", "null", "Traceback"]
 
 
@@ -551,3 +553,147 @@ def test_frequent_phrases_bookkeeping_without_auto_insertion(client):
     )
     b3 = r3.json()
     assert "best regards" not in b3["draft"]["body"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Completeness pass — BCC, KEEP_GOING, REPLY_ALL, FORWARD
+# ---------------------------------------------------------------------------
+
+
+def test_add_bcc_via_voice_turn(client):
+    session_id = "flow-bcc"
+    client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell John Smith I will be late"}
+    )
+    r = client.post("/api/turn", json={"session_id": session_id, "transcript": "add bcc Sarah"})
+    b = r.json()
+    _assert_speech_is_clean(b["speech"])
+    assert "Blind copying Sarah Lee." in b["speech"]
+    assert b["draft"]["bcc"] == ["sarah.lee@example.com"]
+    assert b["draft"]["bcc_names"] == ["Sarah Lee"]
+
+
+def test_bcc_is_read_back_before_send_can_be_honoured(client):
+    """A6: BCC is invisible to other recipients, but the user sending it
+    must still hear it before "send" is honoured.
+    """
+    session_id = "flow-bcc-readback"
+    client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell John Smith I will be late"}
+    )
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "add bcc Sarah"})
+    r = client.post("/api/turn", json={"session_id": session_id, "transcript": "read it back"})
+    assert "Blind copying Sarah Lee." in r.json()["speech"]
+
+
+def test_add_bcc_ambiguous_name_fails_cleanly(client):
+    session_id = "flow-bcc-ambiguous"
+    client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell Sarah Lee I will be late"}
+    )
+    r = client.post("/api/turn", json={"session_id": session_id, "transcript": "bcc John"})
+    b = r.json()
+    _assert_speech_is_clean(b["speech"])
+    assert "couldn't tell who you meant" in b["speech"]
+    assert b["phase"] == "awaiting_confirm"
+    assert b["draft"]["bcc"] == []
+
+
+def test_add_bcc_bare_phrase_gives_instructions(client):
+    session_id = "flow-bcc-bare"
+    client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell John Smith I will be late"}
+    )
+    r = client.post("/api/turn", json={"session_id": session_id, "transcript": "add bcc"})
+    b = r.json()
+    _assert_speech_is_clean(b["speech"])
+    assert "add bcc" in b["speech"].lower()
+
+
+@pytest.mark.parametrize("phase_transcript", ["tell John Smith I will be late", None])
+def test_keep_going_never_leaks_into_compose_or_edit_content(client, phase_transcript):
+    """The actual regression being guarded against: before this fix,
+    saying the literal phrase the app itself tells users to say could get
+    composed/edited as content. Assert on draft/phase equality, not just
+    the spoken string.
+    """
+    session_id = "flow-keep-going-" + ("idle" if phase_transcript is None else "confirm")
+    if phase_transcript:
+        client.post("/api/turn", json={"session_id": session_id, "transcript": phase_transcript})
+
+    before = client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "read it back" if phase_transcript else "help"}
+    ).json()
+
+    r = client.post("/api/turn", json={"session_id": session_id, "transcript": "keep going"})
+    b = r.json()
+    _assert_speech_is_clean(b["speech"])
+    assert b["speech"] == "Go ahead, I'm listening."
+    assert b["phase"] == before["phase"]
+    assert b["draft"] == before["draft"]
+
+
+def test_keep_going_in_reading_inbox_is_a_pure_no_op(client):
+    session_id = "flow-keep-going-inbox"
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "read my unread mail"})
+    r = client.post("/api/turn", json={"session_id": session_id, "transcript": "keep going"})
+    b = r.json()
+    assert b["speech"] == "Go ahead, I'm listening."
+    assert b["phase"] == "reading_inbox"
+
+
+def test_reply_all_ccs_original_recipients_excluding_sender_and_self(client):
+    """Fake inbox message #2 (David Chen) has cc=[Sarah Lee, Alex Kim] and
+    to=[the fake "my own" address] — reply-all should CC Sarah and Alex,
+    never David (becomes the primary recipient) and never the fake "me".
+    """
+    session_id = "flow-reply-all"
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "read my unread mail"})
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "next email"})  # David Chen
+
+    r = client.post("/api/turn", json={"session_id": session_id, "transcript": "reply all"})
+    b = r.json()
+    _assert_speech_is_clean(b["speech"])
+    assert b["phase"] == "review"
+    assert set(b["draft"]["cc"]) == {"sarah.lee@example.com", "alex.kim@example.com"}
+    assert "david.chen@example.com" not in b["draft"]["cc"]
+    assert "me@example.com" not in b["draft"]["cc"]
+
+    r2 = client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "sounds good, see you then"}
+    )
+    b2 = r2.json()
+    _assert_speech_is_clean(b2["speech"])
+    assert b2["phase"] == "awaiting_confirm"
+    assert set(b2["draft"]["cc"]) == {"sarah.lee@example.com", "alex.kim@example.com"}
+
+
+def test_forward_asks_who_then_resolves_via_the_existing_awaiting_address_flow(client):
+    session_id = "flow-forward"
+    client.post("/api/turn", json={"session_id": session_id, "transcript": "read my unread mail"})
+
+    r1 = client.post("/api/turn", json={"session_id": session_id, "transcript": "forward this"})
+    b1 = r1.json()
+    _assert_speech_is_clean(b1["speech"])
+    assert b1["phase"] == "awaiting_address"
+    assert "Forwarding this message" in b1["speech"]
+    assert b1["draft"]["thread_id"] is None  # a new, unthreaded message
+    assert "Forwarded message from Priya Nair" in b1["draft"]["body"]
+    assert "-----" not in b1["draft"]["body"]  # no decorative dash header, reads terribly via TTS
+
+    r2 = client.post("/api/turn", json={"session_id": session_id, "transcript": "John Smith"})
+    b2 = r2.json()
+    _assert_speech_is_clean(b2["speech"])
+    assert b2["phase"] == "awaiting_confirm"
+    assert b2["draft"]["recipient_name"] == "John Smith"
+    assert b2["draft"]["subject"].startswith("Fwd:")
+
+
+def test_reply_all_and_forward_refused_outside_reading_inbox(client):
+    for transcript in ("reply all", "forward this"):
+        r = client.post(
+            "/api/turn", json={"session_id": f"flow-guard2-{transcript}", "transcript": transcript}
+        )
+        b = r.json()
+        _assert_speech_is_clean(b["speech"])
+        assert "haven't opened your inbox" in b["speech"]

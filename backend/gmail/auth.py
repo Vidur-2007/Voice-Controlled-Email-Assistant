@@ -134,3 +134,21 @@ def connect() -> None:
     if token_path.exists():
         token_path.unlink()
     _run_interactive_flow()
+
+
+def get_my_email() -> str:
+    """F36 (reply-all): the authenticated account's own address, so it can
+    be excluded from a reply-all's CC list. Calls Gmail's getProfile() —
+    confirmed against the installed Gmail API discovery doc that this
+    requires only the gmail.modify scope already granted since Phase 6, so
+    adding this needs NO scope bump and NO forced reconnect (unlike the
+    gmail.modify scope-bump episode Phase 6 actually had to handle).
+    """
+    from googleapiclient.discovery import build  # local import: avoids a
+
+    # module-load-time dependency on googleapiclient for callers that only
+    # need get_credentials()/connect() (e.g. routes/mail.py's /mail/auth).
+    creds = get_credentials()
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    profile = service.users().getProfile(userId="me").execute()
+    return profile["emailAddress"]

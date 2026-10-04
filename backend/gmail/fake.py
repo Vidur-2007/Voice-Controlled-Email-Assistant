@@ -65,6 +65,11 @@ def fake_save_draft(draft: Draft) -> MailResult:
 # re-literal-ing the messages.
 # ---------------------------------------------------------------------------
 
+# The fixed fake "authenticated account" address — used for self-exclusion
+# in fake-mode reply-all, mirroring what a real get_my_email() (gmail/auth.py)
+# returns via a real getProfile() call.
+_FAKE_MY_EMAIL = "me@example.com"
+
 _FAKE_INBOX_SEED = [
     {
         "id": "fake-msg-1",
@@ -79,6 +84,8 @@ _FAKE_INBOX_SEED = [
             "look good.\n\nThanks,\nPriya"
         ),
         "message_id_header": "<fake-msg-1@example.com>",
+        "to": [_FAKE_MY_EMAIL],
+        "cc": [],
     },
     {
         "id": "fake-msg-2",
@@ -92,6 +99,11 @@ _FAKE_INBOX_SEED = [
             "place near the office I've been wanting to try.\n\nDavid"
         ),
         "message_id_header": "<fake-msg-2@example.com>",
+        # A non-trivial CC list specifically so reply-all has something real
+        # to test: excludes David (the sender, already becoming "To") and
+        # _FAKE_MY_EMAIL (self), leaving Sarah Lee + Alex Kim.
+        "to": [_FAKE_MY_EMAIL],
+        "cc": ["sarah.lee@example.com", "alex.kim@example.com"],
     },
     {
         "id": "fake-msg-3",
@@ -105,6 +117,8 @@ _FAKE_INBOX_SEED = [
             "payment will be charged automatically."
         ),
         "message_id_header": "<fake-msg-3@example.com>",
+        "to": [_FAKE_MY_EMAIL],
+        "cc": [],
     },
 ]
 
@@ -153,8 +167,17 @@ def fake_list_unread(limit: int) -> list[InboxItem]:
 def fake_get_thread_context(thread_id: str) -> ThreadContext:
     for msg in _FAKE_INBOX_SEED:
         if msg["thread_id"] == thread_id:
-            return ThreadContext(text=msg["body"], last_message_id_header=msg["message_id_header"])
+            return ThreadContext(
+                text=msg["body"],
+                last_message_id_header=msg["message_id_header"],
+                to_recipients=list(msg["to"]),
+                cc_recipients=list(msg["cc"]),
+            )
     return ThreadContext(text="", last_message_id_header=None)
+
+
+def fake_get_my_email() -> str:
+    return _FAKE_MY_EMAIL
 
 
 def fake_archive(message_id: str) -> MailResult:

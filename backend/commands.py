@@ -23,6 +23,17 @@ synonym-cluster in this table). CC and schedule carry free-form content
 `match_cc_trigger`/`match_schedule_trigger` below, which mirror the
 prefix-matching `mode_detect.py::check_override()` already uses for F4.
 
+Completeness pass (post-Phase-9 audit against the spec) adds: ADD_BCC
+(F29 — "Add CC / BCC by voice" named BCC in its title but only CC was
+ever wired; `match_bcc_trigger` mirrors `match_cc_trigger` exactly),
+KEEP_GOING (§22 lists it explicitly — the phrase the app itself tells
+users to say after an F10 auto-stop — but it was never actually
+registered, so saying it risked leaking into compose/edit content as
+literal text), and REPLY_ALL/FORWARD (F36 — "Reply / reply-all /
+forward"; only plain reply was built in Phase 6, explicitly deferred at
+the time; phrases invented the same way REPLY/READ_FULL/MARK_READ
+already were).
+
 Matching is exact-phrase (trimmed, lowercased, compared against the whole
 transcript) — not substring search — so "I'll cancel my subscription"
 doesn't accidentally trigger CANCEL.
@@ -33,6 +44,7 @@ from typing import Literal, Optional
 from backend.models import Phase
 
 _CC_TRIGGERS = ("add cc ", "copy in ", "cc ", "copy ")
+_BCC_TRIGGERS = ("add bcc ", "bcc ")
 _SCHEDULE_TRIGGERS = ("send this at ", "send this for ", "schedule this for ", "schedule this at ")
 
 Intent = Literal[
@@ -68,6 +80,10 @@ Intent = Literal[
     "ATTACH",
     "ATTACH_LAST",
     "SCHEDULE",
+    "ADD_BCC",
+    "KEEP_GOING",
+    "REPLY_ALL",
+    "FORWARD",
 ]
 
 _PHRASES: dict[str, Intent] = {
@@ -174,6 +190,22 @@ _PHRASES: dict[str, Intent] = {
     "attach a document": "ATTACH",
     "attach the last document i mentioned": "ATTACH_LAST",
     "attach that again": "ATTACH_LAST",
+    # ADD_BCC (F29) — exact mirror of ADD_CC's bare form. "add bcc Sarah" /
+    # "bcc Sarah" carry a name and are matched by match_bcc_trigger()
+    # below instead, never as a literal dict key.
+    "add bcc": "ADD_BCC",
+    # KEEP_GOING (F10, §22) — the exact phrase the app itself tells users
+    # to say after an auto-stop. Was never registered; saying it risked
+    # falling through and being treated as literal compose/edit content.
+    "keep going": "KEEP_GOING",
+    # REPLY_ALL / FORWARD (F36) — not in §22's table; invented, same as
+    # REPLY/READ_FULL/MARK_READ already were.
+    "reply all": "REPLY_ALL",
+    "reply to everyone": "REPLY_ALL",
+    "reply all to this": "REPLY_ALL",
+    "forward this": "FORWARD",
+    "forward this email": "FORWARD",
+    "forward it": "FORWARD",
 }
 
 # Canned instructions passed to ai/edit.py::revise() for each grammar-
@@ -226,6 +258,22 @@ def match_cc_trigger(transcript: str) -> Optional[str]:
     return None
 
 
+def match_bcc_trigger(transcript: str) -> Optional[str]:
+    """F29: "bcc Sarah" / "add bcc Sarah" — exact mirror of
+    match_cc_trigger(). Confirmed no collision either direction: "bcc "
+    never starts with any of _CC_TRIGGERS' four prefixes, and "cc "/"copy"
+    never start with either of _BCC_TRIGGERS' two.
+    """
+    stripped = transcript.strip()
+    low = stripped.lower()
+    for trigger in _BCC_TRIGGERS:
+        if low.startswith(trigger):
+            hint = stripped[len(trigger):].strip()
+            if hint:
+                return hint
+    return None
+
+
 def match_schedule_trigger(transcript: str) -> Optional[str]:
     """F35: "send this at 5pm" / "schedule this for tomorrow at 9am" — the
     time phrase varies per utterance. Returns the trailing time phrase, or
@@ -252,9 +300,9 @@ def help_speech(phase: Phase) -> str:
             "shorter, make it more formal, make it friendly or firm, or "
             "ask for a change in your own words, and say undo if you "
             "don't like the result. Say copy in and a name to add a CC, "
-            "attach a file to add an attachment, or send this at and a "
-            "time to schedule it for later. Say help to hear this list "
-            "again."
+            "or bcc and a name to blind copy someone, attach a file to "
+            "add an attachment, or send this at and a time to schedule "
+            "it for later. Say help to hear this list again."
         )
     if phase == "awaiting_address":
         return (
@@ -276,8 +324,9 @@ def help_speech(phase: Phase) -> str:
             "Say next email or previous email to move through your inbox, "
             "who is it from to hear the sender, summarise this one for the "
             "gist, read it in full to hear the whole message, archive this "
-            "to remove it, mark as read, or reply to answer it. Say start "
-            "over to leave your inbox."
+            "to remove it, mark as read, reply to answer it, reply all to "
+            "answer everyone, or forward this to send it on to someone "
+            "else. Say start over to leave your inbox."
         )
     if phase == "review":
         return (

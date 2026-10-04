@@ -17,6 +17,7 @@ full).
 
 import base64
 import re
+from email.utils import getaddresses
 
 from googleapiclient.discovery import build
 
@@ -102,6 +103,21 @@ def _parse_sender(from_header: str) -> tuple[str, str]:
     return from_header, from_header
 
 
+def _parse_addresses(header_value: str) -> list[str]:
+    """F36 (reply-all): a To/Cc header can hold several comma-separated
+    addresses, and a quoted display name can itself contain a comma
+    ('"Kim, Alex" <alex.kim@example.com>, David Chen <...>') — a naive
+    .split(",") would wrongly split that into three pieces. Verified
+    directly against the installed stdlib: email.utils.getaddresses()
+    handles this correctly, treating the quoted comma as part of the one
+    display name, not a delimiter. Returns just the email half of each
+    pair; empty/unparseable entries are dropped.
+    """
+    if not header_value:
+        return []
+    return [addr for _name, addr in getaddresses([header_value]) if addr]
+
+
 def list_unread(limit: int = 10) -> list[InboxItem]:
     settings = get_settings()
     if settings.fake_gmail:
@@ -165,12 +181,29 @@ def get_thread_context(thread_id: str) -> ThreadContext:
 
     last_headers = messages[-1].get("payload", {}).get("headers", [])
     last_message_id_header = _header(last_headers, "Message-Id") or None
+    to_recipients = _parse_addresses(_header(last_headers, "To"))
+    cc_recipients = _parse_addresses(_header(last_headers, "Cc"))
 
-    return ThreadContext(text="\n\n---\n\n".join(texts), last_message_id_header=last_message_id_header)
+    return ThreadContext(
+        text="\n\n---\n\n".join(texts),
+        last_message_id_header=last_message_id_header,
+        to_recipients=to_recipients,
+        cc_recipients=cc_recipients,
+    )
 
 
 def get_thread_text(thread_id: str) -> str:
     return get_thread_context(thread_id).text
+
+
+def get_my_email() -> str:
+    """F36 (reply-all): dispatches fake-vs-real, matching the pattern every
+    other function in this file already uses.
+    """
+    settings = get_settings()
+    if settings.fake_gmail:
+        return fake.fake_get_my_email()
+    return auth.get_my_email()
 
 
 def archive(message_id: str) -> MailResult:

@@ -28,6 +28,7 @@ from backend.commands import (
     FORCED_LENGTH,
     FORCED_TONE,
     help_speech,
+    match_bcc_trigger,
     match_cc_trigger,
     match_schedule_trigger,
     parse_command,
@@ -35,7 +36,7 @@ from backend.commands import (
 from backend.data.contacts import increment_use_count, match_clarifying_answer, resolve_cc_hint, resolve_recipient
 from backend.data.prefs import get_tone_for_recipient, record_phrase, set_tone_for_recipient
 from backend.errors import SpokenError, to_spoken
-from backend.gmail.inbox import archive, get_thread_context, list_unread, mark_read
+from backend.gmail.inbox import archive, get_my_email, get_thread_context, list_unread, mark_read
 from backend.gmail.schedule import parse_schedule_time, schedule_send
 from backend.gmail.send import save_draft, send_email
 from backend.models import Draft, TurnRequest, TurnResponse
@@ -103,6 +104,8 @@ _ATTACH_INSTRUCTION = (
 _ATTACH_BUTTON_ID = "attach-btn"
 _NO_PRIOR_ATTACHMENT = "You haven't attached anything yet this session. Say attach a file to choose one."
 _ADD_CC_INSTRUCTION = "Say add cc and then a name, like add cc Sarah, or copy in Sarah."
+_ADD_BCC_INSTRUCTION = "Say add bcc and then a name, like add bcc Sarah."
+_ASK_FORWARD_RECIPIENT = "Forwarding this message. Who would you like to send it to?"
 
 
 def _resolve_recipient_stub(hint: str) -> tuple[str, str]:
@@ -122,6 +125,28 @@ def _resolve_recipient_stub(hint: str) -> tuple[str, str]:
 
 def _unknown_contact_message(hint: str) -> str:
     return f"I don't have a contact called {hint.strip().title()}. Who should I send this to?"
+
+
+def _forward_subject(original_subject: str) -> str:
+    stripped = original_subject.strip()
+    if not stripped:
+        return "Fwd:"
+    if stripped.lower().startswith("fwd:"):
+        return stripped
+    return f"Fwd: {stripped}"
+
+
+def _forward_body(sender_name: str, subject: str, thread_text: str) -> str:
+    """F36: plain prose, not a decorative ASCII header — confirmed
+    `normalize_for_speech()`'s markdown-stripping regex doesn't touch
+    hyphens, so a Gmail-style "----- Forwarded message -----" divider
+    would be read aloud as a run of spoken dashes. One body field serves
+    both the literal sent content and the spoken readback, so the same
+    plain-prose wording is used for both.
+    """
+    who = sender_name or "someone"
+    subj = subject.strip() or "no subject"
+    return f"Forwarded message from {who}, subject {subj}: {thread_text.strip()}"
 
 
 def _reply_subject(original_subject: str) -> str:
@@ -207,6 +232,27 @@ def _handle_cc_trigger(state: ConversationState, hint: str) -> TurnResponse:
     emails = [e.strip() for e in result.email.split(",")]
     state.draft.cc.extend(emails)
     state.draft.cc_names.extend(names)
+    return _respond(state, build_readback(state.draft))
+
+
+def _handle_bcc_trigger(state: ConversationState, hint: str) -> TurnResponse:
+    """F29: "bcc Sarah" / "add bcc Sarah" — exact mirror of
+    _handle_cc_trigger(), writing to draft.bcc/bcc_names instead.
+    """
+    if state.phase != "awaiting_confirm":
+        return _respond(state, _NEEDS_READY_DRAFT)
+
+    result = resolve_cc_hint(hint)
+    if result.status != "resolved":
+        return _respond(
+            state,
+            f"I couldn't tell who you meant by {hint.strip().title()} for the BCC. Say a full name.",
+        )
+
+    names = [n.strip() for n in result.name.split(",")]
+    emails = [e.strip() for e in result.email.split(",")]
+    state.draft.bcc.extend(emails)
+    state.draft.bcc_names.extend(names)
     return _respond(state, build_readback(state.draft))
 
 
@@ -527,10 +573,76 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
         who = item.sender_name or speakable_email(item.sender_email) or "them"
         return _respond(state, f"Replying to {who}. {_ASK_REPLY_CONTENT}")
 
+    if intent == "REPLY_ALL":
+        if state.phase != "reading_inbox" or not state.inbox:
+            return _respond(state, _NO_INBOX_LOADED)
+        item = state.inbox[state.inbox_index]
+        try:
+            context = get_thread_context(item.thread_id)
+            my_email = get_my_email()
+        except Exception as exc:  # noqa: BLE001
+            return _respond(state, to_spoken(exc), ok=False)
+
+        # Everyone the original message went to, minus the sender (already
+        # becoming the primary recipient) and "my own" address — no
+        # contact-DB names exist for addresses pulled straight off a
+        # header, so cc_names is left shorter than cc; _cc_speech() already
+        # tolerates that, falling back to speakable_email() per address.
+        exclude = {item.sender_email.lower(), my_email.lower()}
+        seen: set[str] = set()
+        others = []
+        for addr in context.to_recipients + context.cc_recipients:
+            low = addr.lower()
+            if low in exclude or low in seen:
+                continue
+            seen.add(low)
+            others.append(addr)
+
+        state.draft = Draft(
+            recipient=item.sender_email,
+            recipient_name=item.sender_name,
+            subject=_reply_subject(item.subject),
+            thread_id=item.thread_id,
+            in_reply_to=context.last_message_id_header,
+            cc=others,
+        )
+        _apply_tone_default(state.draft, item.sender_email)
+        state.phase = "review"
+        who = item.sender_name or speakable_email(item.sender_email) or "them"
+        return _respond(state, f"Replying to {who} and everyone else on the thread. {_ASK_REPLY_CONTENT}")
+
+    if intent == "FORWARD":
+        if state.phase != "reading_inbox" or not state.inbox:
+            return _respond(state, _NO_INBOX_LOADED)
+        item = state.inbox[state.inbox_index]
+        try:
+            context = get_thread_context(item.thread_id)
+        except Exception as exc:  # noqa: BLE001
+            return _respond(state, to_spoken(exc), ok=False)
+        state.draft = Draft(
+            subject=_forward_subject(item.subject),
+            body=_forward_body(item.sender_name, item.subject, context.text),
+        )
+        state.phase = "awaiting_address"
+        return _respond(state, _ASK_FORWARD_RECIPIENT)
+
     if intent == "ADD_CC":
         if state.phase != "awaiting_confirm":
             return _respond(state, _NEEDS_READY_DRAFT)
         return _respond(state, _ADD_CC_INSTRUCTION)
+
+    if intent == "ADD_BCC":
+        if state.phase != "awaiting_confirm":
+            return _respond(state, _NEEDS_READY_DRAFT)
+        return _respond(state, _ADD_BCC_INSTRUCTION)
+
+    if intent == "KEEP_GOING":
+        # F10: the exact phrase the app tells users to say after an
+        # auto-stop. A no-op — phase/draft untouched, relying on
+        # TurnResponse.listen_again's default True so the mic reopens.
+        # Without this, the literal words "keep going" would fall through
+        # and risk being treated as compose/edit content.
+        return _respond(state, "Go ahead, I'm listening.")
 
     if intent == "NEW_PARAGRAPH":
         # Almost always dead in practice — the real F28 effect is the text
@@ -600,6 +712,10 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
     cc_hint = match_cc_trigger(transcript)
     if cc_hint is not None:
         return _handle_cc_trigger(state, cc_hint)
+
+    bcc_hint = match_bcc_trigger(transcript)
+    if bcc_hint is not None:
+        return _handle_bcc_trigger(state, bcc_hint)
 
     schedule_phrase = match_schedule_trigger(transcript)
     if schedule_phrase is not None:

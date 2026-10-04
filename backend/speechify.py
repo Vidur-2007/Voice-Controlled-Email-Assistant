@@ -80,6 +80,27 @@ def _cc_speech(draft: Draft) -> str:
     return f"Copying {_join_plain_and(names)}."
 
 
+def _bcc_names(draft: Draft) -> list[str]:
+    """Exact mirror of _cc_names() for draft.bcc/bcc_names."""
+    names = []
+    for i, email in enumerate(draft.bcc):
+        name = draft.bcc_names[i] if i < len(draft.bcc_names) else ""
+        names.append(name or speakable_email(email))
+    return names
+
+
+def _bcc_speech(draft: Draft) -> str:
+    """A6: BCC is invisible to the OTHER recipients by definition, but the
+    user sending it must still hear it before "send" is honoured — the
+    rule doesn't get to skip a field just because it's normally hidden
+    from everyone else.
+    """
+    names = _bcc_names(draft)
+    if not names:
+        return ""
+    return f"Blind copying {_join_plain_and(names)}."
+
+
 def _attachments_speech(draft: Draft) -> str:
     """A6/A12: an attachment changes what "send" actually does, so it must
     be heard before confirming, the same as CC.
@@ -93,9 +114,9 @@ def _attachments_speech(draft: Draft) -> str:
 
 
 def build_readback(draft: Draft) -> str:
-    """Recipient first, then CC, then attachments, then subject, then
-    body, then the confirmation prompt (F23). Mandatory before "send" can
-    ever be honoured (A6).
+    """Recipient first, then CC, then BCC, then attachments, then subject,
+    then body, then the confirmation prompt (F23). Mandatory before
+    "send" can ever be honoured (A6).
     """
     recipient_speech = (
         draft.recipient_name or speakable_email(draft.recipient) or "an unspecified recipient"
@@ -108,6 +129,10 @@ def build_readback(draft: Draft) -> str:
     cc_speech = _cc_speech(draft)
     if cc_speech:
         parts.append(cc_speech)
+
+    bcc_speech = _bcc_speech(draft)
+    if bcc_speech:
+        parts.append(bcc_speech)
 
     attachments_speech = _attachments_speech(draft)
     if attachments_speech:
