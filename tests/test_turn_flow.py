@@ -49,6 +49,29 @@ def test_full_conversation_compose_readback_send(client):
     assert "Sent to John Smith" in b3["speech"]
     assert b3["phase"] == "idle"
 
+    # F54: this one scripted flow (compose, an edit, a send) already exercises
+    # most of the §10.2 event table — checked once here rather than with a
+    # dedicated test per event type.
+    from backend.data.store import get_connection
+
+    events_seen = {
+        row[0]
+        for row in get_connection().execute(
+            "SELECT event FROM events WHERE session_id = ?", (session_id,)
+        ).fetchall()
+    }
+    assert events_seen >= {
+        "turn_start",
+        "asr_result",
+        "command_matched",
+        "draft_created",
+        "edit_requested",
+        "repair_turn",
+        "readback_start",
+        "send_confirmed",
+        "send_result",
+    }
+
 
 def test_shorter_then_formal_then_undo(client):
     """The Phase 3 gate scenario, fully offline (FAKE_AI=1).

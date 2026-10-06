@@ -216,9 +216,9 @@ function beginListening() {
   });
 }
 
-function handleFinalTranscript(text) {
+function handleFinalTranscript(text, hadInterimChange) {
   logTurn("you", text);
-  runTurn(text);
+  runTurn(text, hadInterimChange);
 }
 
 function submitCommand(phrase) {
@@ -231,7 +231,7 @@ function submitCommand(phrase) {
   runTurn(phrase);
 }
 
-async function runTurn(transcriptText) {
+async function runTurn(transcriptText, hadInterimChange = null) {
   turnGeneration += 1;
   const myGeneration = turnGeneration;
 
@@ -250,7 +250,7 @@ async function runTurn(transcriptText) {
     cues.startWorkingLoop();
   }, 1500);
 
-  const response = await api.postTurn(sessionId, transcriptText);
+  const response = await api.postTurn(sessionId, transcriptText, hadInterimChange);
   clearTimeout(ackTimer);
   cues.stopWorkingLoop();
   if (myGeneration !== turnGeneration) return; // superseded by a barge-in/Escape

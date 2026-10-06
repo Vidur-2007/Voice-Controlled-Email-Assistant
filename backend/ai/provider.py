@@ -18,6 +18,7 @@ from pydantic import BaseModel, ValidationError
 
 from backend.config import Settings, get_settings
 from backend.errors import SpokenError
+from backend.events import get_current_session, log_event
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -97,19 +98,41 @@ def _log_failure(reason: str, start: float) -> None:
 
 def _generate_ollama(system: str, user: str, schema_model: type[T], settings: Settings) -> T:
     schema = schema_model.model_json_schema()
+    start = time.monotonic()
+    retried = False
 
     content = _call_ollama(system, user, schema, settings)
     try:
-        return schema_model.model_validate_json(content)
+        result = schema_model.model_validate_json(content)
     except ValidationError:
         logger.warning("schema validation failed on first attempt, retrying once")
+        retried = True
         retry_user = user + _SCHEMA_RESTATE_TEMPLATE.format(schema=schema)
         content = _call_ollama(system, retry_user, schema, settings)
         try:
-            return schema_model.model_validate_json(content)
+            result = schema_model.model_validate_json(content)
         except ValidationError as exc:
             logger.warning("schema validation failed on retry, giving up")
             raise SpokenError(_RETRY_FAILED_MESSAGE) from exc
+
+    # F54: only when a turn is actually in progress (ai/provider.py has no
+    # other way to know a session id — see backend/events.py) — the
+    # stateless /api/draft/* endpoints never set this, so a direct call
+    # from there logs nothing, by design.
+    session_id = get_current_session()
+    if session_id is not None:
+        log_event(
+            session_id,
+            "llm_call",
+            ms=int((time.monotonic() - start) * 1000),
+            detail={
+                "fn": schema_model.__name__,
+                "model": settings.llm_model,
+                "output_words": len(content.split()),
+                "retried": retried,
+            },
+        )
+    return result
 
 
 def _generate_gemini(system: str, user: str, schema_model: type[T], settings: Settings) -> T:

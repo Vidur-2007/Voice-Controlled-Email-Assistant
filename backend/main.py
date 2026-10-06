@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import get_settings
 from backend.gmail.schedule import run_due_scheduled_sends
-from backend.routes import voice, draft, mail, prefs
+from backend.routes import voice, draft, mail, metrics, prefs
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -66,6 +66,7 @@ def health():
 app.include_router(voice.router, prefix="/api")
 app.include_router(draft.router, prefix="/api")
 app.include_router(mail.router, prefix="/api")
+app.include_router(metrics.router, prefix="/api")
 app.include_router(prefs.router, prefix="/api")
 
 # Static mount MUST be last — see ordering rule above.

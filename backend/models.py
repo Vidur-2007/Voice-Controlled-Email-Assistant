@@ -41,6 +41,11 @@ class Draft(BaseModel):
 class TurnRequest(BaseModel):
     session_id: str = Field(min_length=1)
     transcript: str = ""
+    # F54/§11.1 heuristic 1: did the final transcript differ from the last
+    # interim result shown before it finalized? None when the turn didn't
+    # come from live mic recognition (e.g. a typed command), so it's never
+    # confused with a real "no" answer.
+    had_interim_change: Optional[bool] = None
 
 
 class TurnResponse(BaseModel):

@@ -49,6 +49,12 @@ let active = false; // recognition engine actually running right now
 
 let finalBuffer = "";
 let lastInterimText = "";
+// F54/§11.1 heuristic 1: did the recogniser revise a word between the
+// last interim result and the final one? Captured the instant a result
+// in THIS event is final, against whatever interim text the PRIOR event
+// left behind — lastInterimText itself gets overwritten below on every
+// event, so this has to be read before that happens.
+let hadInterimChange = false;
 let debounceTimer = null;
 let interimFallbackTimer = null;
 let silenceTimer = null;
@@ -110,12 +116,14 @@ function flushTurn() {
   // Prefer a real final result; fall back to the last stable interim if
   // Chrome never finalized anything at all (the short-utterance quirk).
   const text = finalBuffer.trim() || lastInterimText.trim();
+  const changed = hadInterimChange;
   finalBuffer = "";
   lastInterimText = "";
+  hadInterimChange = false;
   if (text) {
     wantListening = false; // this listening session is done
     stopEngine();
-    callbacks.onFinal(text);
+    callbacks.onFinal(text, changed);
   }
 }
 
@@ -139,16 +147,24 @@ function buildRecognition() {
     if (!isCurrent()) return;
 
     let interimText = "";
+    let finalizedThisEvent = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const result = event.results[i];
       const transcript = result[0] ? result[0].transcript : "";
       if (result.isFinal) {
         finalBuffer = (finalBuffer + " " + transcript).trim();
+        finalizedThisEvent = (finalizedThisEvent + " " + transcript).trim();
       } else {
         interimText += transcript;
       }
     }
 
+    if (finalizedThisEvent) {
+      const priorInterim = lastInterimText.trim();
+      if (priorInterim && priorInterim !== finalizedThisEvent) {
+        hadInterimChange = true;
+      }
+    }
     lastInterimText = interimText;
     callbacks.onInterim((finalBuffer + " " + interimText).trim());
 
@@ -172,6 +188,7 @@ function buildRecognition() {
         clearInterimFallback();
         finalBuffer = "";
         lastInterimText = "";
+        hadInterimChange = false;
         wantListening = false;
         stopEngine();
         callbacks.onAutoStop();
@@ -196,6 +213,7 @@ function buildRecognition() {
     clearAllTimers();
     finalBuffer = "";
     lastInterimText = "";
+    hadInterimChange = false;
     callbacks.onError({ type });
   };
 
@@ -243,6 +261,7 @@ export function startListening({ onInterim, onFinal, onError, onAutoStop, silenc
     silenceStopMs = sMs || 0;
     finalBuffer = "";
     lastInterimText = "";
+    hadInterimChange = false;
     clearAllTimers();
     return;
   }
@@ -251,6 +270,7 @@ export function startListening({ onInterim, onFinal, onError, onAutoStop, silenc
   silenceStopMs = sMs || 0;
   finalBuffer = "";
   lastInterimText = "";
+  hadInterimChange = false;
 
   recognition = buildRecognition();
   wantListening = true;

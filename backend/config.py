@@ -35,6 +35,8 @@ class Settings(BaseModel):
     user_first_name: str = ""  # used for sign-offs (F19)
     attachments_dir: str = "attachments"  # F30
     scheduler_poll_s: int = 30  # F35 — how often the background poller checks for due sends
+    log_content: bool = False  # F54 — see the privacy rule in PHASE_10_PLUS_SPEC.md §10.2.
+    # Default OFF. Only a consented study session should ever set this to 1.
 
 
 @lru_cache
@@ -58,4 +60,5 @@ def get_settings() -> Settings:
         user_first_name=os.getenv("USER_FIRST_NAME", ""),
         attachments_dir=os.getenv("ATTACHMENTS_DIR", "attachments"),
         scheduler_poll_s=int(os.getenv("SCHEDULER_POLL_S", "30")),
+        log_content=os.getenv("LOG_CONTENT", "0") == "1",
     )

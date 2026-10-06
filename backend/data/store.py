@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS sent_log (
   ts TEXT NOT NULL,
   recipient TEXT, subject TEXT, tone TEXT
 );
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  event TEXT NOT NULL,
+  phase TEXT,
+  ms INTEGER,
+  detail TEXT
+);
 """
 
 SEED_FILE = Path(__file__).parent / "seed_contacts.json"

@@ -14,6 +14,7 @@ hatch), never for the initial resolution attempt anymore.
 """
 
 import re
+import time
 from typing import Optional
 
 from fastapi import APIRouter
@@ -36,6 +37,7 @@ from backend.commands import (
 from backend.data.contacts import increment_use_count, match_clarifying_answer, resolve_cc_hint, resolve_recipient
 from backend.data.prefs import get_tone_for_recipient, record_phrase, set_tone_for_recipient
 from backend.errors import SpokenError, to_spoken
+from backend.events import categorize_error, classify_repair_turn, log_event, set_current_session
 from backend.gmail.inbox import archive, get_my_email, get_thread_context, list_unread, mark_read
 from backend.gmail.schedule import parse_schedule_time, schedule_send
 from backend.gmail.send import save_draft, send_email
@@ -197,6 +199,24 @@ def _record_personalisation_on_send(draft: Draft) -> None:
     record_phrase(_extract_signoff(draft.body))
 
 
+def _log_draft_created(state: ConversationState, mode: str) -> None:
+    """F54: the one point where `draft_created` is logged, called the
+    instant a draft's body first becomes non-empty — fresh compose, a
+    reply/reply-all's content turn, and forward all funnel through here.
+    """
+    log_event(
+        state.session_id,
+        "draft_created",
+        phase=state.phase,
+        detail={
+            "mode": mode,
+            "body_words": len(state.draft.body.split()),
+            "subject_words": len(state.draft.subject.split()),
+        },
+        content={"body": state.draft.body, "subject": state.draft.subject},
+    )
+
+
 def _try_mark_read(message_id: str) -> None:
     """Best-effort mark-read used by SUMMARISE/READ_FULL: a labeling
     failure must never mask the answer the user actually asked for. The
@@ -232,7 +252,7 @@ def _handle_cc_trigger(state: ConversationState, hint: str) -> TurnResponse:
     emails = [e.strip() for e in result.email.split(",")]
     state.draft.cc.extend(emails)
     state.draft.cc_names.extend(names)
-    return _respond(state, build_readback(state.draft))
+    return _respond(state, _speak_readback(state))
 
 
 def _handle_bcc_trigger(state: ConversationState, hint: str) -> TurnResponse:
@@ -253,7 +273,7 @@ def _handle_bcc_trigger(state: ConversationState, hint: str) -> TurnResponse:
     emails = [e.strip() for e in result.email.split(",")]
     state.draft.bcc.extend(emails)
     state.draft.bcc_names.extend(names)
-    return _respond(state, build_readback(state.draft))
+    return _respond(state, _speak_readback(state))
 
 
 def _resolve_schedule_phrase(state: ConversationState, session_id: str, phrase: str) -> TurnResponse:
@@ -300,6 +320,8 @@ def _respond(
     state: ConversationState, speech: str, *, ok: bool = True, focus_target: Optional[str] = None
 ) -> TurnResponse:
     state.last_speech = speech
+    if not ok:
+        log_event(state.session_id, "error_spoken", phase=state.phase, detail={"category": categorize_error(speech)})
     return TurnResponse(
         speech=speech,
         phase=state.phase,
@@ -310,6 +332,21 @@ def _respond(
     )
 
 
+def _speak_readback(state: ConversationState) -> str:
+    """F54: the one point where `readback_start` is logged — every other
+    call site speaks a draft back via this wrapper instead of calling
+    build_readback() directly. `enhanced` is schema-reserved for Phase
+    11's ENHANCED_READBACK flag and is always False here.
+    """
+    log_event(
+        state.session_id,
+        "readback_start",
+        phase=state.phase,
+        detail={"body_words": len(state.draft.body.split()), "enhanced": False},
+    )
+    return build_readback(state.draft)
+
+
 def _compose_and_readback(state: ConversationState, transcript: str, mode: str) -> TurnResponse:
     try:
         draft, recipient_hint = compose_email(transcript, mode)
@@ -318,6 +355,7 @@ def _compose_and_readback(state: ConversationState, transcript: str, mode: str) 
 
     state.draft = draft
     state.mode = mode
+    _log_draft_created(state, mode)
 
     result = resolve_recipient(recipient_hint, transcript)
 
@@ -340,7 +378,7 @@ def _compose_and_readback(state: ConversationState, transcript: str, mode: str) 
     state.draft.recipient = result.email
     _apply_tone_default(state.draft, result.email)
     state.phase = "awaiting_confirm"
-    return _respond(state, build_readback(state.draft))
+    return _respond(state, _speak_readback(state))
 
 
 def _start_composing(state: ConversationState, transcript: str) -> TurnResponse:
@@ -404,14 +442,41 @@ def _apply_edit(
     state.history.append(previous)
     state.redo_stack.clear()
     state.draft = new_draft
-    return _respond(state, build_readback(state.draft))
+
+    kind = "tone" if forced_tone is not None else "length" if forced_length is not None else "free_form"
+    log_event(state.session_id, "edit_requested", phase=state.phase, detail={"kind": kind})
+    log_event(
+        state.session_id,
+        "repair_turn",
+        phase=state.phase,
+        detail={"reason": classify_repair_turn(late_edit=True)},
+    )
+    return _respond(state, _speak_readback(state))
 
 
 def _handle_command(state: ConversationState, session_id: str, intent: str) -> TurnResponse:
     if intent == "SEND":
         if state.phase != "awaiting_confirm":
             return _respond(state, _SEND_TOO_EARLY)
+        log_event(
+            session_id,
+            "send_confirmed",
+            phase=state.phase,
+            detail={},
+            content={"recipient": state.draft.recipient},
+        )
+        start = time.monotonic()
         result = send_email(state.draft)
+        log_event(
+            session_id,
+            "send_result",
+            phase=state.phase,
+            ms=int((time.monotonic() - start) * 1000),
+            detail={
+                "success": result.success,
+                "error_category": None if result.success else categorize_error(result.message),
+            },
+        )
         if result.success:
             _record_personalisation_on_send(state.draft)
             reset_session(session_id)
@@ -439,8 +504,15 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
         return _respond(state, _CANCELLED)
 
     if intent == "RESTART":
+        prior_phase = state.phase
         reset_session(session_id)
         state = get_session(session_id)
+        log_event(
+            session_id,
+            "repair_turn",
+            phase=prior_phase,
+            detail={"reason": classify_repair_turn(start_over=True)},
+        )
         return _respond(state, _RESTARTED)
 
     if intent == "HELP":
@@ -460,6 +532,10 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
             return _respond(state, _NOTHING_TO_UNDO)
         state.redo_stack.append(state.draft.model_copy(deep=True))
         state.draft = state.history.pop()
+        log_event(session_id, "edit_requested", phase=state.phase, detail={"kind": "undo"})
+        log_event(
+            session_id, "repair_turn", phase=state.phase, detail={"reason": classify_repair_turn(undo=True)}
+        )
         return _respond(state, f"Undone. {summarize_draft(state.draft)}")
 
     if intent == "REDO":
@@ -467,6 +543,10 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
             return _respond(state, _NOTHING_TO_REDO)
         state.history.append(state.draft.model_copy(deep=True))
         state.draft = state.redo_stack.pop()
+        log_event(session_id, "edit_requested", phase=state.phase, detail={"kind": "redo"})
+        log_event(
+            session_id, "repair_turn", phase=state.phase, detail={"reason": classify_repair_turn(redo=True)}
+        )
         return _respond(state, f"Redone. {summarize_draft(state.draft)}")
 
     if intent in EDIT_INSTRUCTIONS:
@@ -624,6 +704,7 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
             body=_forward_body(item.sender_name, item.subject, context.text),
         )
         state.phase = "awaiting_address"
+        _log_draft_created(state, "forward")
         return _respond(state, _ASK_FORWARD_RECIPIENT)
 
     if intent == "ADD_CC":
@@ -655,7 +736,7 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
         state.draft.body = state.draft.body.rstrip() + "\n\n"
         state.history.append(previous)
         state.redo_stack.clear()
-        return _respond(state, build_readback(state.draft))
+        return _respond(state, _speak_readback(state))
 
     if intent == "ATTACH":
         if state.phase != "awaiting_confirm":
@@ -669,11 +750,11 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
         if not path:
             return _respond(state, _NO_PRIOR_ATTACHMENT, focus_target=_ATTACH_BUTTON_ID)
         state.draft.attachments.append(path)
-        return _respond(state, build_readback(state.draft))
+        return _respond(state, _speak_readback(state))
 
     # REPEAT
     if state.phase == "awaiting_confirm" and state.draft.body:
-        speech = build_readback(state.draft)
+        speech = _speak_readback(state)
     elif state.last_speech:
         speech = state.last_speech
     else:
@@ -683,19 +764,52 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
 
 def _handle_turn(req: TurnRequest) -> TurnResponse:
     state = get_session(req.session_id)
+    set_current_session(req.session_id)
     transcript = req.transcript.strip()
+
+    log_event(
+        req.session_id,
+        "turn_start",
+        phase=state.phase,
+        detail={"transcript_words": len(transcript.split())},
+        content={"transcript": transcript},
+    )
+    log_event(
+        req.session_id,
+        "asr_result",
+        phase=state.phase,
+        detail={
+            "words": len(transcript.split()),
+            # Confidence stays unpopulated until Phase 11 verifies whether
+            # the browser's confidence signal is usable at all (§11.1) —
+            # the columns exist now so that phase only has to fill them in.
+            "min_confidence": None,
+            "mean_confidence": None,
+            "had_interim_change": req.had_interim_change,
+        },
+    )
 
     # F9: "no wait, change that to…" — a single hook point, before anything
     # else touches the transcript, covers every phase uniformly. Re-check
     # for empty AFTER stripping: a correction-marker-only utterance
     # ("scratch that" alone) legitimately has nothing left to act on.
+    original_transcript = transcript
     transcript = strip_correction(transcript)
+
+    if transcript != original_transcript:
+        log_event(
+            req.session_id,
+            "repair_turn",
+            phase=state.phase,
+            detail={"reason": classify_repair_turn(self_corrected=True)},
+        )
 
     if not transcript:
         return _respond(state, _CATCH_NOTHING_HEARD)
 
     intent = parse_command(transcript)
     if intent is not None:
+        log_event(req.session_id, "command_matched", phase=state.phase, detail={"intent": intent})
         return _handle_command(state, req.session_id, intent)
 
     # Checked BEFORE the generic trigger-matching below: once we're
@@ -740,6 +854,12 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
             # from the previous spoken sentence — reusing the prior
             # question text would compound the "sorry" prefix on a
             # second consecutive mismatch.
+            log_event(
+                req.session_id,
+                "repair_turn",
+                phase=state.phase,
+                detail={"reason": classify_repair_turn(reclarify=True)},
+            )
             question = build_disambiguation_question(state.clarifying_hint, state.candidates)
             return _respond(state, _DID_NOT_CATCH_CLARIFYING_ANSWER.format(question=question))
 
@@ -750,7 +870,7 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
         state.candidates = []
         state.clarifying_hint = ""
         state.phase = "awaiting_confirm"
-        return _respond(state, build_readback(state.draft))
+        return _respond(state, _speak_readback(state))
 
     if state.phase == "awaiting_address":
         recipient_name, recipient = _resolve_recipient_stub(transcript)
@@ -758,7 +878,7 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
         state.draft.recipient = recipient
         _apply_tone_default(state.draft, recipient)
         state.phase = "awaiting_confirm"
-        return _respond(state, build_readback(state.draft))
+        return _respond(state, _speak_readback(state))
 
     if state.phase == "awaiting_confirm":
         # Not a known command (checked above) and not a grammar-matched
@@ -784,7 +904,8 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
         state.draft.tone = reply_draft.tone
         state.draft.length = reply_draft.length
         state.phase = "awaiting_confirm"
-        return _respond(state, build_readback(state.draft))
+        _log_draft_created(state, "reply")
+        return _respond(state, _speak_readback(state))
 
     # reading_inbox: everything reachable here is a grammar-matched command
     # (handled above via _handle_command), so free text that falls through
@@ -797,6 +918,11 @@ def turn(req: TurnRequest) -> TurnResponse:
     try:
         return _handle_turn(req)
     except SpokenError as exc:
+        # Bypasses _respond() entirely (no ConversationState reached this
+        # far), so this is the one place error_spoken can't be centralized
+        # through it — logged here instead, same categorize_error() helper.
+        log_event(req.session_id, "error_spoken", detail={"category": categorize_error(exc.message)})
         return TurnResponse(speech=to_spoken(exc), ok=False)
     except Exception as exc:  # noqa: BLE001 - last-resort safety net, rule A5
+        log_event(req.session_id, "error_spoken", detail={"category": type(exc).__name__})
         return TurnResponse(speech=to_spoken(exc), ok=False)

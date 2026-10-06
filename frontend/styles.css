@@ -124,7 +124,6 @@ h1 {
   border-radius: 999px;
   padding: 20px 24px;
   cursor: pointer;
-  transition: transform 0.15s ease, background 0.15s ease;
 }
 
 #mic-btn:hover:not(:disabled) {
@@ -153,6 +152,13 @@ h1 {
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  /* A8: the hover/state-colour transition, like the pulse below it,
+     is motion — gated the same way so a reduced-motion user gets an
+     instant change instead of a 0.15s animation. */
+  #mic-btn {
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+
   #mic-btn[data-state="listening"] {
     animation: mic-pulse 1.4s ease-in-out infinite;
   }

@@ -7,11 +7,15 @@ stays 1 throughout, as conftest.py mandates, with zero interaction between
 the two, and no network call happens anywhere.
 """
 
+import json
+
 import pytest
 from pydantic import BaseModel
 
 from backend.ai import provider
+from backend.data.store import get_connection
 from backend.errors import SpokenError
+from backend.events import get_current_session, set_current_session
 
 
 class _Field(BaseModel):
@@ -84,3 +88,54 @@ def test_generate_speaks_generic_ollama_error(monkeypatch):
     with pytest.raises(SpokenError) as exc_info:
         provider.generate("system", "user", _Field)
     assert exc_info.value.message == "The writing assistant ran into a problem, so nothing was sent. Say it again in a moment."
+
+
+def _events_for(session_id: str) -> list[tuple]:
+    return get_connection().execute(
+        "SELECT event, ms, detail FROM events WHERE session_id = ? ORDER BY id", (session_id,)
+    ).fetchall()
+
+
+def test_generate_logs_llm_call_on_success(monkeypatch):
+    _install_queue(monkeypatch, ['{"value": "hello there"}'])
+    set_current_session("provider-success")
+    try:
+        provider.generate("system", "user", _Field)
+    finally:
+        set_current_session(None)
+
+    rows = _events_for("provider-success")
+    assert len(rows) == 1
+    event, ms, detail_raw = rows[0]
+    assert event == "llm_call"
+    assert ms is not None
+    detail = json.loads(detail_raw)
+    assert detail["fn"] == "_Field"
+    assert detail["retried"] is False
+    assert detail["output_words"] > 0
+
+
+def test_generate_logs_retried_true_on_a_retry(monkeypatch):
+    _install_queue(monkeypatch, ["not valid json at all", '{"value": "recovered"}'])
+    set_current_session("provider-retried")
+    try:
+        provider.generate("system", "user", _Field)
+    finally:
+        set_current_session(None)
+
+    rows = _events_for("provider-retried")
+    assert len(rows) == 1
+    detail = json.loads(rows[0][2])
+    assert detail["retried"] is True
+
+
+def test_generate_logs_nothing_without_a_current_session(monkeypatch):
+    # Simulates /api/draft/compose calling compose_email() -> generate()
+    # directly, with no voice.py turn (and thus no session) involved.
+    set_current_session(None)
+    assert get_current_session() is None
+    before = get_connection().execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    _install_queue(monkeypatch, ['{"value": "hello"}'])
+    provider.generate("system", "user", _Field)
+    after = get_connection().execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    assert after == before

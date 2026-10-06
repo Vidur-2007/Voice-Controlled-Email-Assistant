@@ -57,8 +57,12 @@ async function postJson(path, body) {
 }
 
 /** POST /api/turn. Always resolves with a TurnResponse-shaped object. */
-export async function postTurn(sessionId, transcript) {
-  const data = await postJson("/api/turn", { session_id: sessionId, transcript });
+export async function postTurn(sessionId, transcript, hadInterimChange = null) {
+  const body = { session_id: sessionId, transcript };
+  // Omitted (not just null) for a typed/non-mic turn, so it's never
+  // confused with a real "no" answer from live recognition (F54).
+  if (hadInterimChange !== null) body.had_interim_change = hadInterimChange;
+  const data = await postJson("/api/turn", body);
   if (!data) {
     return fallbackTurnResponse("I couldn't reach the server, so nothing was sent.");
   }
