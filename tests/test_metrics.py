@@ -2,6 +2,8 @@
 GET /api/metrics/summary and GET /api/metrics/export.csv.
 """
 
+from backend.config import get_settings
+
 
 def test_metrics_summary_on_empty_database(client):
     resp = client.get("/api/metrics/summary")
@@ -14,6 +16,7 @@ def test_metrics_summary_on_empty_database(client):
     assert body["aggregate"]["model_latency_ms"] == {}
     assert body["aggregate"]["edits_after_readback"] == 0
     assert body["aggregate"]["sends_abandoned"] == 0
+    assert body["aggregate"]["readbacks_by_condition"] == {"plain": 0, "enhanced": 0}
 
 
 def test_metrics_export_csv_on_empty_database(client):
@@ -60,3 +63,25 @@ def test_metrics_summary_counts_abandoned_send(client):
     resp = client.get("/api/metrics/summary")
     body = resp.json()
     assert body["aggregate"]["sends_abandoned"] >= 1
+
+
+def test_metrics_summary_splits_readbacks_by_condition(client, monkeypatch):
+    session_id = "metrics-condition"
+    client.post(
+        "/api/turn", json={"session_id": session_id, "transcript": "tell John Smith I will be late"}
+    )
+    plain_body = client.get("/api/metrics/summary").json()
+    assert plain_body["aggregate"]["readbacks_by_condition"]["plain"] >= 1
+
+    monkeypatch.setenv("ENHANCED_READBACK", "1")
+    get_settings.cache_clear()
+    try:
+        client.post(
+            "/api/turn",
+            json={"session_id": "metrics-condition-2", "transcript": "tell John Smith I will be late"},
+        )
+        enhanced_body = client.get("/api/metrics/summary").json()
+        assert enhanced_body["aggregate"]["readbacks_by_condition"]["enhanced"] >= 1
+    finally:
+        monkeypatch.delenv("ENHANCED_READBACK", raising=False)
+        get_settings.cache_clear()

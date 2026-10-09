@@ -2,8 +2,10 @@ from datetime import datetime
 
 from backend.models import Draft
 from backend.speechify import (
+    build_enhanced_readback,
     build_readback,
     normalize_for_speech,
+    spell_phonetically,
     speak_schedule_time,
     speak_time_of_day,
     speakable_email,
@@ -148,3 +150,122 @@ def test_speak_schedule_time_rolled_forward_discloses_why():
     speech = speak_schedule_time(datetime(2026, 1, 2, 13, 0), rolled_to_tomorrow=True)
     assert "1 PM tomorrow" in speech
     assert "already passed" in speech
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 (§11.4): build_readback() got zero code changes for this phase —
+# these assert the FULL literal string, not just a substring, so a future
+# change can't quietly alter text the existing suite's `in` assertions
+# wouldn't notice.
+# ---------------------------------------------------------------------------
+
+
+def test_build_readback_exact_strings_unchanged_plain():
+    draft = Draft(recipient_name="John", subject="Running late", body="I will be late.")
+    assert build_readback(draft) == (
+        "To John. Subject: Running late. Message: I will be late. "
+        "Say send to send it, or tell me what to change."
+    )
+
+
+def test_build_readback_exact_strings_unchanged_with_cc():
+    draft = Draft(
+        recipient_name="John",
+        subject="Update",
+        body="Hi.",
+        cc=["sarah.lee@example.com"],
+        cc_names=["Sarah Lee"],
+    )
+    assert build_readback(draft) == (
+        "To John. Copying Sarah Lee. Subject: Update. Message: Hi. "
+        "Say send to send it, or tell me what to change."
+    )
+
+
+def test_build_readback_exact_strings_unchanged_long_body():
+    long_body = " ".join(["word"] * 150)
+    draft = Draft(recipient_name="John", subject="Update", body=long_body)
+    assert build_readback(draft) == (
+        "To John. Subject: Update. Message: The message is about 150 words. "
+        f"Here it is. {long_body} Say send to send it, or tell me what to change."
+    )
+
+
+# ---------------------------------------------------------------------------
+# F52 — spell_phonetically() (§11.2)
+# ---------------------------------------------------------------------------
+
+
+def test_spell_phonetically_letters():
+    assert spell_phonetically("ab") == "A for Alpha, B for Bravo"
+
+
+def test_spell_phonetically_is_case_insensitive():
+    assert spell_phonetically("AB") == spell_phonetically("ab")
+
+
+def test_spell_phonetically_digits_read_as_digits():
+    assert spell_phonetically("5") == "5"
+    assert spell_phonetically("a1") == "A for Alpha, 1"
+
+
+def test_spell_phonetically_punctuation_named():
+    assert spell_phonetically(".") == "dot"
+    assert spell_phonetically("@") == "at"
+    assert spell_phonetically("-") == "hyphen"
+    assert spell_phonetically("_") == "underscore"
+
+
+def test_spell_phonetically_full_address():
+    out = spell_phonetically("jo@a.io")
+    assert out == (
+        "J for Juliet, O for Oscar, at, A for Alpha, dot, I for India, O for Oscar"
+    )
+
+
+# ---------------------------------------------------------------------------
+# F53 — build_enhanced_readback() (§11.3)
+# ---------------------------------------------------------------------------
+
+
+def test_build_enhanced_readback_zero_uncertain_matches_plain_readback():
+    draft = Draft(recipient_name="John", subject="Update", body="Hi.")
+    segments = build_enhanced_readback(draft, uncertain_words=set(), spell_recipient=False)
+    assert len(segments) == 1
+    assert segments[0].text == build_readback(draft)
+    assert segments[0].rate == "normal"
+    assert segments[0].cue is False
+
+
+def test_build_enhanced_readback_never_announces_zero_uncertain_words():
+    draft = Draft(recipient_name="John", subject="Update", body="Hi there friend.")
+    segments = build_enhanced_readback(draft, uncertain_words={"nonexistentword"}, spell_recipient=False)
+    full_text = " ".join(s.text for s in segments)
+    assert "I was unsure about 0" not in full_text
+    assert not any(s.cue for s in segments)
+
+
+def test_build_enhanced_readback_marks_exactly_the_uncertain_word():
+    draft = Draft(recipient_name="John", subject="Update", body="Call mom tonight please.")
+    segments = build_enhanced_readback(draft, uncertain_words={"tonight"}, spell_recipient=False)
+    cued = [s for s in segments if s.cue]
+    assert len(cued) == 1
+    assert cued[0].text.strip(".,") == "tonight"
+    assert cued[0].rate == "slow"
+    full_text = " ".join(s.text for s in segments)
+    assert "I was unsure about 1 word." in full_text
+
+
+def test_build_enhanced_readback_multiple_uncertain_words_use_plural():
+    draft = Draft(recipient_name="John", subject="Update", body="Call mom tonight please.")
+    segments = build_enhanced_readback(draft, uncertain_words={"tonight", "please"}, spell_recipient=False)
+    full_text = " ".join(s.text for s in segments)
+    assert "I was unsure about 2 words." in full_text
+
+
+def test_build_enhanced_readback_auto_spells_unfamiliar_recipient_even_with_nothing_uncertain():
+    draft = Draft(recipient="unknown.name@example.com", recipient_name="Unknown Name", subject="Hi", body="Hi.")
+    segments = build_enhanced_readback(draft, uncertain_words=set(), spell_recipient=True)
+    full_text = " ".join(s.text for s in segments)
+    assert "U for Uniform" in full_text  # spelled form of the address present
+    assert "I was unsure about 0" not in full_text  # spelling != uncertainty

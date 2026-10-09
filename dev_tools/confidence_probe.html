@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Confidence probe (throwaway — Phase 11, §11.1)</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; }
+  button { font-size: 18px; padding: 10px 20px; cursor: pointer; }
+  #status { font-weight: bold; margin: 12px 0; }
+  pre { background: #111; color: #0f0; padding: 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
+  .instructions { background: #eef; padding: 12px; border-radius: 6px; }
+</style>
+</head>
+<body>
+  <h1>Speech confidence probe</h1>
+  <p class="instructions">
+    This is a <strong>throwaway test page</strong> for Phase 11 (§11.1) — it is not part of
+    the real app and won't be kept. Click "Start", then speak <strong>ten separate
+    utterances</strong>, pausing briefly between each so they end up as separate result
+    rows below. For the <strong>10th</strong>, deliberately mumble or trail off — the whole
+    point is to see what <code>confidence</code> does on a bad utterance versus a clear one.
+    When you're done, copy everything in the black box below and paste it back.
+  </p>
+  <button id="start-btn">Start</button>
+  <button id="stop-btn">Stop</button>
+  <button id="clear-btn">Clear log</button>
+  <div id="status">Idle.</div>
+  <pre id="log"></pre>
+
+  <script>
+    const logEl = document.getElementById("log");
+    const statusEl = document.getElementById("status");
+    let recognition = null;
+    let utteranceCount = 0;
+
+    function log(line) {
+      logEl.textContent += line + "\n";
+      console.log(line);
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    document.getElementById("clear-btn").addEventListener("click", () => {
+      logEl.textContent = "";
+      utteranceCount = 0;
+    });
+
+    document.getElementById("start-btn").addEventListener("click", () => {
+      const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!Ctor) {
+        setStatus("SpeechRecognition is not supported in this browser.");
+        return;
+      }
+      recognition = new Ctor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = "en-US";
+
+      recognition.onstart = () => setStatus("Listening… speak utterance " + (utteranceCount + 1) + " of 10.");
+
+      recognition.onresult = (event) => {
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const result = event.results[i];
+          const alt = result[0];
+          const ts = new Date().toISOString().split("T")[1].replace("Z", "");
+          log(
+            `[${ts}] resultIndex=${i} isFinal=${result.isFinal} ` +
+              `confidence=${alt.confidence} transcript="${alt.transcript.trim()}"`
+          );
+          if (result.isFinal) {
+            utteranceCount += 1;
+            setStatus(
+              utteranceCount >= 10
+                ? "Done — 10 utterances captured. Copy the log below and paste it back."
+                : `Heard utterance ${utteranceCount}. Speak utterance ${utteranceCount + 1} of 10` +
+                  (utteranceCount === 9 ? " — this one should be deliberately mumbled." : ".")
+            );
+          }
+        }
+      };
+
+      recognition.onerror = (event) => {
+        log(`[error] ${event.error}`);
+      };
+
+      recognition.onend = () => {
+        setStatus("Stopped. Click Start to continue if you still have utterances left.");
+      };
+
+      recognition.start();
+    });
+
+    document.getElementById("stop-btn").addEventListener("click", () => {
+      if (recognition) recognition.stop();
+    });
+  </script>
+</body>
+</html>

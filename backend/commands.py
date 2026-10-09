@@ -84,6 +84,9 @@ Intent = Literal[
     "KEEP_GOING",
     "REPLY_ALL",
     "FORWARD",
+    "SPELL_LAST",
+    "SPELL_RECIPIENT",
+    "SPELL_SUBJECT",
 ]
 
 _PHRASES: dict[str, Intent] = {
@@ -206,6 +209,13 @@ _PHRASES: dict[str, Intent] = {
     "forward this": "FORWARD",
     "forward this email": "FORWARD",
     "forward it": "FORWARD",
+    # SPELL (F52, Phase 11) — "spell that" repeats whichever field was
+    # last discussed (ConversationState.last_field_named); the other two
+    # name a specific field explicitly.
+    "spell that": "SPELL_LAST",
+    "spell it": "SPELL_LAST",
+    "spell the recipient": "SPELL_RECIPIENT",
+    "spell the subject": "SPELL_SUBJECT",
 }
 
 # Canned instructions passed to ai/edit.py::revise() for each grammar-

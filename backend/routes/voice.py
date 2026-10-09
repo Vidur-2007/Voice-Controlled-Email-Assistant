@@ -34,7 +34,15 @@ from backend.commands import (
     match_schedule_trigger,
     parse_command,
 )
-from backend.data.contacts import increment_use_count, match_clarifying_answer, resolve_cc_hint, resolve_recipient
+from backend.config import get_settings
+from backend.data.contacts import (
+    increment_use_count,
+    is_known_contact,
+    known_contact_name_words,
+    match_clarifying_answer,
+    resolve_cc_hint,
+    resolve_recipient,
+)
 from backend.data.prefs import get_tone_for_recipient, record_phrase, set_tone_for_recipient
 from backend.errors import SpokenError, to_spoken
 from backend.events import categorize_error, classify_repair_turn, log_event, set_current_session
@@ -45,6 +53,7 @@ from backend.models import Draft, TurnRequest, TurnResponse
 from backend.session import ConversationState, get_session, reset_session
 from backend.speechify import (
     build_disambiguation_question,
+    build_enhanced_readback,
     build_full_message_readback,
     build_inbox_listing,
     build_readback,
@@ -54,9 +63,11 @@ from backend.speechify import (
     read_subject,
     speak_schedule_time,
     speakable_email,
+    spell_phonetically,
     summarize_draft,
 )
 from backend.text_correction import strip_correction
+from backend.uncertainty import collect_uncertain_words
 
 router = APIRouter()
 
@@ -149,6 +160,23 @@ def _forward_body(sender_name: str, subject: str, thread_text: str) -> str:
     who = sender_name or "someone"
     subj = subject.strip() or "no subject"
     return f"Forwarded message from {who}, subject {subj}: {thread_text.strip()}"
+
+
+_NOTHING_TO_SPELL = "There's nothing in the {field} yet to spell."
+
+
+def _spell_field(state: ConversationState, field: str) -> str:
+    """F52 — "spell that" / "spell the recipient" / "spell the subject"."""
+    draft = state.draft
+    if field == "recipient":
+        text = draft.recipient or draft.recipient_name
+    elif field == "subject":
+        text = draft.subject
+    else:
+        text = draft.body
+    if not text:
+        return _NOTHING_TO_SPELL.format(field=field)
+    return spell_phonetically(text)
 
 
 def _reply_subject(original_subject: str) -> str:
@@ -322,6 +350,10 @@ def _respond(
     state.last_speech = speech
     if not ok:
         log_event(state.session_id, "error_spoken", phase=state.phase, detail={"category": categorize_error(speech)})
+    # F53: a one-shot handoff from _speak_readback(), consumed exactly
+    # once here regardless of which branch produced this response.
+    segments = state.pending_speech_segments
+    state.pending_speech_segments = None
     return TurnResponse(
         speech=speech,
         phase=state.phase,
@@ -329,25 +361,60 @@ def _respond(
         awaiting_confirmation=(state.phase == "awaiting_confirm"),
         ok=ok,
         focus_target=focus_target,
+        speech_segments=segments,
     )
 
 
-def _speak_readback(state: ConversationState) -> str:
-    """F54: the one point where `readback_start` is logged — every other
-    call site speaks a draft back via this wrapper instead of calling
-    build_readback() directly. `enhanced` is schema-reserved for Phase
-    11's ENHANCED_READBACK flag and is always False here.
+def _spellable_recipient(state: ConversationState) -> bool:
+    """F52's automatic trigger: a single (non-group), genuinely unfamiliar
+    address. Group recipients (comma-joined) are never spelled — spelling
+    "sarah@x.com, john@y.com" phonetically makes no sense — mirroring how
+    _apply_tone_default/_record_personalisation_on_send already skip
+    group recipients elsewhere in this file.
     """
+    email = state.draft.recipient
+    return bool(email) and "," not in email and not is_known_contact(email)
+
+
+def _speak_readback(state: ConversationState, uncertain_words: Optional[set] = None) -> str:
+    """F54/F53: the one point where `readback_start` is logged AND the
+    one point that decides plain vs. enhanced delivery — every other call
+    site speaks a draft back via this wrapper instead of calling
+    build_readback()/build_enhanced_readback() directly.
+
+    `uncertain_words` is only ever passed by call sites that just
+    composed or edited fresh content in THIS turn (see
+    _compose_and_readback) — it's meaningless for a readback that's just
+    re-confirming an unchanged draft (CC/BCC, REPEAT, undo, ...), so
+    those call sites pass nothing and get the automatic-spell-only
+    behavior for free.
+    """
+    settings = get_settings()
+    enhanced = settings.enhanced_readback
     log_event(
         state.session_id,
         "readback_start",
         phase=state.phase,
-        detail={"body_words": len(state.draft.body.split()), "enhanced": False},
+        detail={"body_words": len(state.draft.body.split()), "enhanced": enhanced},
     )
-    return build_readback(state.draft)
+    # F52: "spell that" with no field named defaults to whatever was just
+    # read — recipient is always read first, so every readback (plain or
+    # enhanced alike) resets this the same way.
+    state.last_field_named = "recipient"
+
+    if not enhanced:
+        return build_readback(state.draft)
+
+    segments = build_enhanced_readback(
+        state.draft, uncertain_words or set(), spell_recipient=_spellable_recipient(state)
+    )
+    state.pending_speech_segments = segments
+    return " ".join(seg.text for seg in segments)
 
 
-def _compose_and_readback(state: ConversationState, transcript: str, mode: str) -> TurnResponse:
+def _compose_and_readback(
+    state: ConversationState, transcript: str, mode: str, last_interim_transcript: Optional[str] = None
+) -> TurnResponse:
     try:
         draft, recipient_hint = compose_email(transcript, mode)
     except SpokenError as exc:
@@ -356,6 +423,13 @@ def _compose_and_readback(state: ConversationState, transcript: str, mode: str) 
     state.draft = draft
     state.mode = mode
     _log_draft_created(state, mode)
+
+    # F53 (§11.1/§11.2a): computed from THIS turn's raw transcript — the
+    # only point in the whole turn where "what was just spoken" and "what
+    # it turned into" are both still in hand at once.
+    uncertain_words = collect_uncertain_words(
+        transcript, last_interim_transcript, recipient_hint, known_contact_name_words()
+    )
 
     result = resolve_recipient(recipient_hint, transcript)
 
@@ -378,10 +452,12 @@ def _compose_and_readback(state: ConversationState, transcript: str, mode: str) 
     state.draft.recipient = result.email
     _apply_tone_default(state.draft, result.email)
     state.phase = "awaiting_confirm"
-    return _respond(state, _speak_readback(state))
+    return _respond(state, _speak_readback(state, uncertain_words))
 
 
-def _start_composing(state: ConversationState, transcript: str) -> TurnResponse:
+def _start_composing(
+    state: ConversationState, transcript: str, last_interim_transcript: Optional[str] = None
+) -> TurnResponse:
     """Entry point for a fresh utterance at idle phase — mode detection
     (F3/F4/F5) runs before any composition happens.
     """
@@ -390,13 +466,13 @@ def _start_composing(state: ConversationState, transcript: str) -> TurnResponse:
         # (see below); this whole turn's transcript is the content. Idle
         # phase is only ever reached with state.mode already set via that
         # path — any prior draft's mode was cleared by reset_session().
-        return _compose_and_readback(state, transcript, state.mode)
+        return _compose_and_readback(state, transcript, state.mode, last_interim_transcript)
 
     override = mode_detect.check_override(transcript)
     if override is not None:
         mode, remainder = override
         if remainder:
-            return _compose_and_readback(state, remainder, mode)
+            return _compose_and_readback(state, remainder, mode, last_interim_transcript)
         state.mode = mode
         ack = _OVERRIDE_DICTATION_ACK if mode == "dictation" else _OVERRIDE_BRIEF_ACK
         return _respond(state, ack)
@@ -411,7 +487,7 @@ def _start_composing(state: ConversationState, transcript: str) -> TurnResponse:
         state.pending_transcript = transcript
         return _respond(state, mode_detect.ASK_MODE_QUESTION)
 
-    return _compose_and_readback(state, transcript, result.mode)
+    return _compose_and_readback(state, transcript, result.mode, last_interim_transcript)
 
 
 def _apply_edit(
@@ -522,10 +598,24 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
         if state.phase != "awaiting_confirm":
             return _respond(state, _NO_DRAFT_TO_READ)
         if intent == "READ_SUBJECT":
+            state.last_field_named = "subject"
             return _respond(state, read_subject(state.draft))
         if intent == "READ_BODY":
+            state.last_field_named = "body"
             return _respond(state, read_body(state.draft))
+        state.last_field_named = "recipient"
         return _respond(state, read_recipient(state.draft))
+
+    if intent in ("SPELL_LAST", "SPELL_RECIPIENT", "SPELL_SUBJECT"):
+        if state.phase != "awaiting_confirm":
+            return _respond(state, _NO_DRAFT_TO_READ)
+        if intent == "SPELL_RECIPIENT":
+            field = "recipient"
+        elif intent == "SPELL_SUBJECT":
+            field = "subject"
+        else:
+            field = state.last_field_named or "recipient"
+        return _respond(state, _spell_field(state, field))
 
     if intent == "UNDO":
         if not state.history:
@@ -836,7 +926,7 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
         return _handle_schedule_trigger(state, req.session_id, schedule_phrase)
 
     if state.phase == "idle":
-        return _start_composing(state, transcript)
+        return _start_composing(state, transcript, req.last_interim_transcript)
 
     if state.phase == "awaiting_mode":
         mode = mode_detect.match_mode_answer(transcript)

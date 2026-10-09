@@ -55,6 +55,10 @@ let lastInterimText = "";
 // left behind — lastInterimText itself gets overwritten below on every
 // event, so this has to be read before that happens.
 let hadInterimChange = false;
+// Phase 11 (§11.2a): the RAW text behind hadInterimChange, so the backend
+// can diff which words changed, not just that something did. Captured at
+// the exact same point, for the exact same reason.
+let lastInterimTextAtFinal = "";
 let debounceTimer = null;
 let interimFallbackTimer = null;
 let silenceTimer = null;
@@ -117,13 +121,15 @@ function flushTurn() {
   // Chrome never finalized anything at all (the short-utterance quirk).
   const text = finalBuffer.trim() || lastInterimText.trim();
   const changed = hadInterimChange;
+  const priorInterim = lastInterimTextAtFinal;
   finalBuffer = "";
   lastInterimText = "";
   hadInterimChange = false;
+  lastInterimTextAtFinal = "";
   if (text) {
     wantListening = false; // this listening session is done
     stopEngine();
-    callbacks.onFinal(text, changed);
+    callbacks.onFinal(text, changed, priorInterim || null);
   }
 }
 
@@ -163,6 +169,7 @@ function buildRecognition() {
       const priorInterim = lastInterimText.trim();
       if (priorInterim && priorInterim !== finalizedThisEvent) {
         hadInterimChange = true;
+        lastInterimTextAtFinal = priorInterim;
       }
     }
     lastInterimText = interimText;
@@ -189,6 +196,7 @@ function buildRecognition() {
         finalBuffer = "";
         lastInterimText = "";
         hadInterimChange = false;
+        lastInterimTextAtFinal = "";
         wantListening = false;
         stopEngine();
         callbacks.onAutoStop();
@@ -214,6 +222,7 @@ function buildRecognition() {
     finalBuffer = "";
     lastInterimText = "";
     hadInterimChange = false;
+    lastInterimTextAtFinal = "";
     callbacks.onError({ type });
   };
 
@@ -262,6 +271,7 @@ export function startListening({ onInterim, onFinal, onError, onAutoStop, silenc
     finalBuffer = "";
     lastInterimText = "";
     hadInterimChange = false;
+    lastInterimTextAtFinal = "";
     clearAllTimers();
     return;
   }
@@ -271,6 +281,7 @@ export function startListening({ onInterim, onFinal, onError, onAutoStop, silenc
   finalBuffer = "";
   lastInterimText = "";
   hadInterimChange = false;
+  lastInterimTextAtFinal = "";
 
   recognition = buildRecognition();
   wantListening = true;

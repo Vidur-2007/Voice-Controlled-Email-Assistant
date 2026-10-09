@@ -57,6 +57,7 @@ def metrics_summary():
     latencies: dict[str, list[float]] = defaultdict(list)
     edits_after_readback = 0
     sends_abandoned = 0
+    readbacks_by_condition = {"plain": 0, "enhanced": 0}
 
     for _id, session_id, ts, event, phase, ms, detail_raw in _rows():
         detail = json.loads(detail_raw) if detail_raw else {}
@@ -77,6 +78,9 @@ def metrics_summary():
             s["send_ts"] = ts
         elif event == "command_matched" and detail.get("intent") in _ABANDON_INTENTS and phase and phase != "idle":
             sends_abandoned += 1
+        elif event == "readback_start":
+            key = "enhanced" if detail.get("enhanced") else "plain"
+            readbacks_by_condition[key] += 1
 
     sessions_summary = []
     turns_per_send, repair_per_send, wall_clock = [], [], []
@@ -109,6 +113,7 @@ def metrics_summary():
             "model_latency_ms": model_latency,
             "edits_after_readback": edits_after_readback,
             "sends_abandoned": sends_abandoned,
+            "readbacks_by_condition": readbacks_by_condition,
         },
     }
 

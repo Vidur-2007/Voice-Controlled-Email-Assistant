@@ -207,3 +207,82 @@ export function speak(text, { rate } = {}) {
     });
   });
 }
+
+const SLOW_RATE_FACTOR = 0.7;
+
+/**
+ * F53 (Phase 11) — speak a sequence of {text, rate, cue} segments. Each
+ * becomes its own chunked utterance(s) (reusing chunkText) at
+ * `currentRate * (seg.rate === "slow" ? SLOW_RATE_FACTOR : 1)`; `onCue()`
+ * fires immediately before the first chunk of any segment whose `cue` is
+ * true, so the caller can play a distinct tone (cues.js) right before
+ * that word. Same cancel/force-settle contract as speak().
+ */
+export function speakSegments(segments, { onCue } = {}) {
+  const synth = window.speechSynthesis;
+  if (!synth) {
+    return Promise.resolve();
+  }
+
+  stopSpeaking();
+
+  const items = [];
+  for (const seg of segments || []) {
+    const chunks = chunkText(seg.text);
+    chunks.forEach((chunkedText, i) => {
+      items.push({
+        text: chunkedText,
+        rateFactor: seg.rate === "slow" ? SLOW_RATE_FACTOR : 1,
+        cue: Boolean(seg.cue) && i === 0,
+      });
+    });
+  }
+  if (items.length === 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearKeepalive();
+      activeSettle = null;
+      resolve();
+    };
+    activeSettle = finish;
+
+    pickVoice().then((voice) => {
+      if (settled) return; // stopSpeaking() ran while we were resolving a voice
+
+      let index = 0;
+      const speakNext = () => {
+        if (settled) return;
+        if (index >= items.length) {
+          finish();
+          return;
+        }
+        const item = items[index];
+        if (item.cue && onCue) {
+          try {
+            onCue();
+          } catch {
+            /* never let a cue callback break playback */
+          }
+        }
+        const utter = new SpeechSynthesisUtterance(item.text);
+        utter.rate = currentRate * item.rateFactor;
+        if (voice) utter.voice = voice;
+        index += 1;
+
+        utter.onend = () => speakNext();
+        utter.onerror = () => finish();
+
+        synth.speak(utter);
+      };
+
+      startKeepalive();
+      speakNext();
+    });
+  });
+}

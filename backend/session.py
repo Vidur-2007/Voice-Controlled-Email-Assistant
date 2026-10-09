@@ -8,7 +8,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from backend.models import ContactCandidate, Draft, InboxItem, Phase
+from backend.models import ContactCandidate, Draft, InboxItem, Phase, SpeechSegment
 
 
 class ConversationState(BaseModel):
@@ -24,6 +24,15 @@ class ConversationState(BaseModel):
     last_speech: str = ""  # for "repeat that"
     inbox: list[InboxItem] = []
     inbox_index: int = 0
+    # F52 (Phase 11): "the current field being discussed" for a bare
+    # "spell that" — defaults to "recipient" right after any readback
+    # (recipient is always read first), updated by READ_SUBJECT/
+    # READ_BODY/READ_RECIPIENT.
+    last_field_named: Optional[str] = None
+    # F53: set once by _speak_readback(), consumed immediately by
+    # _respond() on the same turn — a transient, one-shot handoff, the
+    # same pattern last_speech already uses.
+    pending_speech_segments: Optional[list[SpeechSegment]] = None
 
 
 _sessions: dict[str, ConversationState] = {}

@@ -46,6 +46,24 @@ class TurnRequest(BaseModel):
     # come from live mic recognition (e.g. a typed command), so it's never
     # confused with a real "no" answer.
     had_interim_change: Optional[bool] = None
+    # Phase 11 (§11.2a): the raw text of that last interim result, so
+    # backend/uncertainty.py can diff which words changed, not just that
+    # something did. Additive alongside had_interim_change above — that
+    # field is untouched and still independently populated.
+    last_interim_transcript: Optional[str] = None
+
+
+class SpeechSegment(BaseModel):
+    """F53 — one piece of an enhanced readback. `rate="slow"`/`cue=True`
+    mark an uncertain (or phonetically spelled) word; everything else is
+    a plain, normal-rate chunk. `TurnResponse.speech` already carries the
+    flattened text either way, so a client that ignores this list still
+    gets a normal sentence.
+    """
+
+    text: str
+    rate: Literal["normal", "slow"] = "normal"
+    cue: bool = False
 
 
 class TurnResponse(BaseModel):
@@ -56,6 +74,9 @@ class TurnResponse(BaseModel):
     listen_again: bool = True  # hint: reopen the mic after speaking
     ok: bool = True  # false = this turn failed; speech explains it
     focus_target: Optional[str] = None  # element id the frontend should focus() (F30)
+    # F53 — None whenever ENHANCED_READBACK=0 (the default); inert for any
+    # client that only reads `speech`.
+    speech_segments: Optional[list[SpeechSegment]] = None
 
 
 class MailResult(BaseModel):

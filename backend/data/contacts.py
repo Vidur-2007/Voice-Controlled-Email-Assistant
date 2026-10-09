@@ -111,6 +111,37 @@ def search(hint: str) -> list[ContactCandidate]:
     return [candidate for candidate, _use_count in scored]
 
 
+def known_contact_name_words() -> set[str]:
+    """Every individual word (lowercased) across all contact names — e.g.
+    "John Smith" contributes "john" and "smith". Used by Phase 11's
+    heuristic 2 (backend/uncertainty.py::is_uncertain_against_contacts)
+    to check a recipient hint's words against known names without
+    needing exact full-name matches.
+    """
+    conn = get_connection()
+    rows = conn.execute("SELECT name FROM contacts").fetchall()
+    words: set[str] = set()
+    for (name,) in rows:
+        words.update(name.lower().split())
+    return words
+
+
+def is_known_contact(email: str) -> bool:
+    """F52's automatic-spell-out trigger (Phase 11): True only for an
+    address that actually came from the contacts table (alias, group, or
+    fuzzy match). The `awaiting_address` escape hatch
+    (routes/voice.py::_resolve_recipient_stub) manufactures a synthetic
+    placeholder address for anything it can't resolve, which by
+    construction never matches a row here — exactly the "unfamiliar"
+    case F52 wants to catch, with no new state needed.
+    """
+    if not email:
+        return False
+    conn = get_connection()
+    row = conn.execute("SELECT 1 FROM contacts WHERE email = ?", (email,)).fetchone()
+    return row is not None
+
+
 def increment_use_count(email: str) -> None:
     conn = get_connection()
     conn.execute("UPDATE contacts SET use_count = use_count + 1 WHERE email = ?", (email,))

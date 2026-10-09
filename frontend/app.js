@@ -216,9 +216,9 @@ function beginListening() {
   });
 }
 
-function handleFinalTranscript(text, hadInterimChange) {
+function handleFinalTranscript(text, hadInterimChange, lastInterimTranscript) {
   logTurn("you", text);
-  runTurn(text, hadInterimChange);
+  runTurn(text, hadInterimChange, lastInterimTranscript);
 }
 
 function submitCommand(phrase) {
@@ -231,7 +231,7 @@ function submitCommand(phrase) {
   runTurn(phrase);
 }
 
-async function runTurn(transcriptText, hadInterimChange = null) {
+async function runTurn(transcriptText, hadInterimChange = null, lastInterimTranscript = null) {
   turnGeneration += 1;
   const myGeneration = turnGeneration;
 
@@ -250,7 +250,7 @@ async function runTurn(transcriptText, hadInterimChange = null) {
     cues.startWorkingLoop();
   }, 1500);
 
-  const response = await api.postTurn(sessionId, transcriptText, hadInterimChange);
+  const response = await api.postTurn(sessionId, transcriptText, hadInterimChange, lastInterimTranscript);
   clearTimeout(ackTimer);
   cues.stopWorkingLoop();
   if (myGeneration !== turnGeneration) return; // superseded by a barge-in/Escape
@@ -260,7 +260,14 @@ async function runTurn(transcriptText, hadInterimChange = null) {
 
   setState("speaking");
   a11y.announce("Speaking…");
-  await tts.speak(response.speech);
+  // F53: speak_segments is only ever present under ENHANCED_READBACK=1;
+  // logTurn() above already used the flat response.speech either way, so
+  // the transcript panel is unaffected by which path plays here.
+  if (response.speech_segments) {
+    await tts.speakSegments(response.speech_segments, { onCue: cues.playUncertainMarker });
+  } else {
+    await tts.speak(response.speech);
+  }
   if (myGeneration !== turnGeneration) return; // superseded while speaking
 
   // F30: point focus at a control (currently only "attach-btn") AFTER

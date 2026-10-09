@@ -37,6 +37,7 @@ class Settings(BaseModel):
     scheduler_poll_s: int = 30  # F35 — how often the background poller checks for due sends
     log_content: bool = False  # F54 — see the privacy rule in PHASE_10_PLUS_SPEC.md §10.2.
     # Default OFF. Only a consented study session should ever set this to 1.
+    enhanced_readback: bool = False  # F53 — mandatory A/B toggle (§11.3). 0 = today's plain readback.
 
 
 @lru_cache
@@ -61,4 +62,5 @@ def get_settings() -> Settings:
         attachments_dir=os.getenv("ATTACHMENTS_DIR", "attachments"),
         scheduler_poll_s=int(os.getenv("SCHEDULER_POLL_S", "30")),
         log_content=os.getenv("LOG_CONTENT", "0") == "1",
+        enhanced_readback=os.getenv("ENHANCED_READBACK", "0") == "1",
     )

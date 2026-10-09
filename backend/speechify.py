@@ -8,7 +8,7 @@ unit-testable without spinning up FastAPI.
 import re
 from pathlib import Path
 
-from backend.models import ContactCandidate, Draft, InboxItem
+from backend.models import ContactCandidate, Draft, InboxItem, SpeechSegment
 
 _MARKDOWN_CHARS = re.compile(r"[*_`#>~\[\]]")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
@@ -148,6 +148,36 @@ def build_readback(draft: Draft) -> str:
     parts.append(body_speech)
     parts.append("Say send to send it, or tell me what to change.")
     return " ".join(parts)
+
+
+_NATO_ALPHABET = {
+    "a": "Alpha", "b": "Bravo", "c": "Charlie", "d": "Delta", "e": "Echo",
+    "f": "Foxtrot", "g": "Golf", "h": "Hotel", "i": "India", "j": "Juliet",
+    "k": "Kilo", "l": "Lima", "m": "Mike", "n": "November", "o": "Oscar",
+    "p": "Papa", "q": "Quebec", "r": "Romeo", "s": "Sierra", "t": "Tango",
+    "u": "Uniform", "v": "Victor", "w": "Whiskey", "x": "X-ray", "y": "Yankee",
+    "z": "Zulu",
+}
+_PUNCTUATION_NAMES = {".": "dot", "@": "at", "-": "hyphen", "_": "underscore"}
+
+
+def spell_phonetically(text: str) -> str:
+    """F52 — "J for Juliet, O for Oscar". NATO alphabet for letters, digits
+    read as digits, punctuation named (dot/at/hyphen/underscore). Pure
+    function, case-insensitive input; any other character is skipped
+    rather than guessed at.
+    """
+    parts = []
+    for ch in text.strip():
+        low = ch.lower()
+        if low in _NATO_ALPHABET:
+            parts.append(f"{ch.upper()} for {_NATO_ALPHABET[low]}")
+        elif low.isdigit():
+            parts.append(low)
+        elif low in _PUNCTUATION_NAMES:
+            parts.append(_PUNCTUATION_NAMES[low])
+        # anything else (whitespace, unexpected punctuation) is skipped
+    return ", ".join(parts)
 
 
 def read_recipient(draft: Draft) -> str:
@@ -315,3 +345,105 @@ def speak_schedule_time(dt, rolled_to_tomorrow: bool = False, is_tomorrow: bool 
     if is_tomorrow:
         return f"{time_speech} tomorrow"
     return f"{time_speech} today"
+
+
+def _mark_segments(text: str, uncertain_words: set) -> list[SpeechSegment]:
+    """Splits `text` on whitespace, grouping consecutive non-uncertain
+    words into one normal-rate segment and giving each word that matches
+    `uncertain_words` (normalized: lowercased, punctuation-stripped) its
+    own slow, cued segment.
+    """
+    if not text:
+        return []
+    segments: list[SpeechSegment] = []
+    buffer: list[str] = []
+
+    def flush_buffer() -> None:
+        if buffer:
+            segments.append(SpeechSegment(text=" ".join(buffer)))
+            buffer.clear()
+
+    for word in text.split(" "):
+        bare = word.strip(".,!?").lower()
+        if bare and bare in uncertain_words:
+            flush_buffer()
+            segments.append(SpeechSegment(text=word, rate="slow", cue=True))
+        else:
+            buffer.append(word)
+    flush_buffer()
+    return segments
+
+
+def build_enhanced_readback(
+    draft: Draft, uncertain_words: set, spell_recipient: bool = False
+) -> list[SpeechSegment]:
+    """F53 — a completely separate function from `build_readback`, never a
+    branch inside it, so the plain path (`ENHANCED_READBACK=0`) can never
+    regress: its code simply never runs when this one does.
+
+    `uncertain_words` is a normalized set from
+    `backend/uncertainty.py::collect_uncertain_words()`. Marking only ever
+    finds a match against text that actually survived composition — an
+    uncertain spoken word that didn't make it into the drafted text
+    (common for an LLM-rewritten brief-mode body) is silently not marked,
+    by design.
+    """
+    if not uncertain_words and not spell_recipient:
+        # Nothing to flag and the recipient is already known: the
+        # enhanced readback IS the plain one, word for word.
+        return [SpeechSegment(text=build_readback(draft))]
+
+    recipient_speech = (
+        draft.recipient_name or speakable_email(draft.recipient) or "an unspecified recipient"
+    )
+    subject_speech = normalize_for_speech(draft.subject) or "no subject"
+    body_speech = normalize_for_speech(draft.body) or "an empty message"
+
+    segments: list[SpeechSegment] = []
+
+    if spell_recipient:
+        segments.append(SpeechSegment(text=f"To {recipient_speech}."))
+        segments.append(
+            SpeechSegment(text=spell_phonetically(draft.recipient or draft.recipient_name), rate="slow")
+        )
+    else:
+        segments.extend(_mark_segments(f"To {recipient_speech}.", uncertain_words))
+
+    cc_speech = _cc_speech(draft)
+    if cc_speech:
+        segments.append(SpeechSegment(text=cc_speech))
+
+    bcc_speech = _bcc_speech(draft)
+    if bcc_speech:
+        segments.append(SpeechSegment(text=bcc_speech))
+
+    attachments_speech = _attachments_speech(draft)
+    if attachments_speech:
+        segments.append(SpeechSegment(text=attachments_speech))
+
+    segments.extend(_mark_segments(f"Subject: {subject_speech}.", uncertain_words))
+    segments.append(SpeechSegment(text="Message:"))
+
+    wc = word_count(draft.body)
+    if wc > _LONG_BODY_WORD_THRESHOLD:
+        segments.append(SpeechSegment(text=f"The message is about {wc} words. Here it is."))
+
+    segments.extend(_mark_segments(body_speech, uncertain_words))
+
+    marked_count = sum(1 for s in segments if s.cue)
+    if marked_count:
+        word_noun = "word" if marked_count == 1 else "words"
+        segments.append(
+            SpeechSegment(
+                text=(
+                    f"I was unsure about {marked_count} {word_noun}. Say spell that to hear "
+                    "them letter by letter, or tell me what to change."
+                )
+            )
+        )
+    else:
+        # Mirrors build_readback()'s own closing line exactly — never
+        # announce a count of zero (§11.4).
+        segments.append(SpeechSegment(text="Say send to send it, or tell me what to change."))
+
+    return segments

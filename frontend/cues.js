@@ -66,6 +66,14 @@ export function playError() {
   tone(220, 450, 0.22);
 }
 
+export function playUncertainMarker() {
+  // F53 (Phase 11) — a short, distinct tone immediately before an
+  // uncertain word in an enhanced readback. Single blip, higher and
+  // shorter than every other cue here (880/740/660/520/220 Hz, all
+  // ≥80ms) so it's never confused with them by ear alone (rule A3).
+  tone(1100, 60, 0.14);
+}
+
 export function playWake() {
   // Phase 9 (F11) — a new, distinct event type (A3: "the app heard its
   // wake phrase" is not the same event as "listening has begun", so it

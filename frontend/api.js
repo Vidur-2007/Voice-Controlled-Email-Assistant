@@ -57,11 +57,14 @@ async function postJson(path, body) {
 }
 
 /** POST /api/turn. Always resolves with a TurnResponse-shaped object. */
-export async function postTurn(sessionId, transcript, hadInterimChange = null) {
+export async function postTurn(sessionId, transcript, hadInterimChange = null, lastInterimTranscript = null) {
   const body = { session_id: sessionId, transcript };
   // Omitted (not just null) for a typed/non-mic turn, so it's never
   // confused with a real "no" answer from live recognition (F54).
   if (hadInterimChange !== null) body.had_interim_change = hadInterimChange;
+  // Phase 11 (§11.2a): the raw interim text, for server-side word-level
+  // diffing — additive alongside the boolean above, never replacing it.
+  if (lastInterimTranscript !== null) body.last_interim_transcript = lastInterimTranscript;
   const data = await postJson("/api/turn", body);
   if (!data) {
     return fallbackTurnResponse("I couldn't reach the server, so nothing was sent.");
