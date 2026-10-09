@@ -17,9 +17,23 @@ from fastapi import APIRouter
 from backend.ai.compose import compose_email
 from backend.ai.edit import revise
 from backend.ai.mode_detect import detect_mode
-from backend.models import Draft, DraftComposeRequest, DraftEditRequest
+from backend.data.draft_recovery import get_recoverable_draft
+from backend.models import Draft, DraftComposeRequest, DraftEditRequest, RecoverableDraftResponse
+from backend.speechify import recovery_offer_speech
 
 router = APIRouter()
+
+
+@router.get("/draft/recoverable", response_model=RecoverableDraftResponse)
+def draft_recoverable() -> RecoverableDraftResponse:
+    """F56 (§13.2) — called by the client once on page load, before any
+    turn exists; see app.js. No session id involved — see
+    backend/data/draft_recovery.py's module docstring for why.
+    """
+    draft = get_recoverable_draft()
+    if draft is None:
+        return RecoverableDraftResponse(recoverable=False)
+    return RecoverableDraftResponse(recoverable=True, draft=draft, speech=recovery_offer_speech(draft))
 
 
 @router.post("/draft/compose", response_model=Draft)

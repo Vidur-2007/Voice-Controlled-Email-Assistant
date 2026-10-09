@@ -82,3 +82,32 @@ def top_phrases(limit: int = 5) -> list[tuple[str, int]]:
         (limit,),
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
+
+
+def record_signoff_phrase(text: str) -> None:
+    """F58 (Phase 13) — a SEPARATE table from `phrases`/`record_phrase()`
+    above: that one mixes openers and signoffs together as generic F44
+    bookkeeping, which would let an opener that happens to repeat more
+    often win "most-used" here. Same upsert shape, same length guard.
+    """
+    text = text.strip()
+    if not text or len(text) > _PHRASE_MAX_LENGTH:
+        return
+    conn = get_connection()
+    row = conn.execute("SELECT id FROM signoff_phrases WHERE text = ?", (text,)).fetchone()
+    if row:
+        conn.execute("UPDATE signoff_phrases SET use_count = use_count + 1 WHERE id = ?", (row[0],))
+    else:
+        conn.execute("INSERT INTO signoff_phrases (text, use_count) VALUES (?, 1)", (text,))
+    conn.commit()
+
+
+def top_signoff_phrase() -> Optional[str]:
+    """F58 — the single most-used recorded sign-off, or None if nothing
+    has been recorded yet.
+    """
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT text FROM signoff_phrases ORDER BY use_count DESC, text ASC LIMIT 1"
+    ).fetchone()
+    return row[0] if row else None

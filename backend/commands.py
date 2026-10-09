@@ -46,6 +46,17 @@ from backend.models import Phase
 _CC_TRIGGERS = ("add cc ", "copy in ", "cc ", "copy ")
 _BCC_TRIGGERS = ("add bcc ", "bcc ")
 _SCHEDULE_TRIGGERS = ("send this at ", "send this for ", "schedule this for ", "schedule this at ")
+# F55 (Phase 13) — longest-first so "search for the message" is tried
+# before the bare "search for" it starts with; otherwise the shorter
+# trigger would match first and leave "the message " stuck onto the
+# front of the extracted query text.
+_SEARCH_TRIGGERS = (
+    "search for the message ",
+    "search my email for ",
+    "find the email ",
+    "find an email ",
+    "search for ",
+)
 
 Intent = Literal[
     "SEND",
@@ -87,6 +98,9 @@ Intent = Literal[
     "SPELL_LAST",
     "SPELL_RECIPIENT",
     "SPELL_SUBJECT",
+    "RESUME_DRAFT",
+    "USE_SIGNOFF",
+    "READ_ATTACHMENT",
 ]
 
 _PHRASES: dict[str, Intent] = {
@@ -216,6 +230,16 @@ _PHRASES: dict[str, Intent] = {
     "spell it": "SPELL_LAST",
     "spell the recipient": "SPELL_RECIPIENT",
     "spell the subject": "SPELL_SUBJECT",
+    # RESUME_DRAFT (F56, Phase 13) — "discard" already maps to CANCEL
+    # above; only "resume" needs a new entry.
+    "resume": "RESUME_DRAFT",
+    # USE_SIGNOFF (F58, Phase 13)
+    "use my usual sign-off": "USE_SIGNOFF",
+    "use my usual signoff": "USE_SIGNOFF",
+    # READ_ATTACHMENT (F57, Phase 13)
+    "read the attachment": "READ_ATTACHMENT",
+    "what's in the attachment": "READ_ATTACHMENT",
+    "whats in the attachment": "READ_ATTACHMENT",
 }
 
 # Canned instructions passed to ai/edit.py::revise() for each grammar-
@@ -296,6 +320,22 @@ def match_schedule_trigger(transcript: str) -> Optional[str]:
             phrase = stripped[len(trigger):].strip()
             if phrase:
                 return phrase
+    return None
+
+
+def match_search_trigger(transcript: str) -> Optional[str]:
+    """F55 (Phase 13): "find the email from Priya about the invoice" /
+    "search for the message about the timetable" — the search content
+    varies per utterance, so it can never be a literal `_PHRASES` key.
+    Returns the trailing free text, or None if no trigger prefix matched.
+    """
+    stripped = transcript.strip()
+    low = stripped.lower()
+    for trigger in _SEARCH_TRIGGERS:
+        if low.startswith(trigger):
+            query = stripped[len(trigger):].strip()
+            if query:
+                return query
     return None
 
 

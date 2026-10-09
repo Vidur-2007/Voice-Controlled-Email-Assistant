@@ -10,8 +10,8 @@ table below at the end of every phase, so a lost session costs one file read.
 |---|---|---|
 | 10 | F54 — compliance check (A8/A9/A10) + instrumentation | **Done** |
 | 11 | F52 (phonetic spell-out), F53 (confidence-flagged readback) | **Done** |
-| 12 | F59 (recipient-before-compose reorder) | Not started |
-| 13 | F55/F56/F57/F58 (search, draft recovery, attachment read-aloud, sign-off) | Not started |
+| 12 | F59 (recipient-before-compose reorder) | **Done** |
+| 13 | F55/F56/F58/F57 (search, draft recovery, sign-off, attachment read-aloud) | **Done** |
 | 14 | F51 (spoken PIN) — optional | Not started |
 
 ## Phase 10 detail
@@ -100,6 +100,35 @@ email containing an unfamiliar address and a deliberately mumbled word under
 `ENHANCED_READBACK=1`, to confirm by ear that the address is spelled and the mumbled word
 is marked. Not something `pytest` can prove.
 
+## Phase 12 detail
+
+**F59 (recipient-before-compose reorder):**
+- `backend/ai/compose.py::extract_recipient_hint()` — the same trigger-word/`_split_hint`
+  heuristic `_fake_compose()` already used internally, exposed standalone so
+  `routes/voice.py` can try resolving a recipient BEFORE composing, with zero model call.
+- `_compose_and_readback()` gets a new pre-block: if a hint is found and resolves
+  ("resolved" or "clarifying"), the ordering changes; "unknown"/"empty"/no-hint-at-all fall
+  straight through to the original, byte-for-byte-unchanged compose-first code.
+- **Resolved**: the recipient's learned tone (`get_tone_for_recipient`) is now looked up
+  and passed into `compose_email(..., tone_hint=...)` — threaded into the actual prompt for
+  real AI (`_real_compose`, mirroring `compose_reply`'s existing pattern exactly) and onto
+  `Draft.tone` directly for fake AI — instead of only being patched onto the field after
+  the fact. `_apply_tone_default` still runs afterward too, as a harmless safety net.
+- **Clarifying**: the disambiguating question is now asked BEFORE any compose call, not
+  after. `ConversationState.pending_recipient_transcript` (new) tracks this pre-compose
+  shape so the clarifying-answer resolution branch knows to compose only once the name is
+  actually resolved, with the now-known tone.
+- **Proof, not just an assertion**: `tests/test_recipient_before_compose.py`'s
+  `test_ambiguous_name_asks_before_any_compose_llm_call` runs under real `FAKE_AI=0` with
+  a mocked Ollama client holding exactly one queued response (the pre-existing
+  `contacts_nlp.py` ContactChoice resolution call, unrelated to this phase) — if
+  `compose_email()` were ever called before clarifying, the mock's queue would be empty and
+  raise loudly, not silently. The events table is also checked directly: the only
+  `llm_call` logged has `fn == "ContactChoice"`, never `"DraftFields"`.
+- `compose_reply()`, `_fake_compose_reply()`, `_real_compose_reply()`, and everything under
+  `reading_inbox`/`review` are untouched — the reply path already had this fixed.
+- Full suite: 389 tests, zero regressions (376 existing + 13 new).
+
 ## F-table addition
 
 | ID | Feature | Phase |
@@ -107,7 +136,63 @@ is marked. Not something `pytest` can prove.
 | F54 | Instrumentation and evaluation harness (`events` table, `log_event`, `classify_repair_turn`, `/api/metrics/*`) | 10 |
 | F52 | Phonetic spell-out of high-risk fields (`spell_phonetically`, spell commands, automatic unfamiliar-recipient trigger) | 11 |
 | F53 | Confidence-flagged readback behind `ENHANCED_READBACK` (`build_enhanced_readback`, uncertainty heuristics, `speech_segments`) | 11 |
+| F59 | Recipient-before-compose reorder (`extract_recipient_hint`, pre-compose tone lookup, pre-compose disambiguation) | 12 |
+| F55 | Voice inbox search (`SearchQueryFields`, `ai/search_query.py`, `gmail/inbox.py::search`) | 13 |
+| F56 | Draft recovery after a crash/reload (`recoverable_draft` table, `GET /api/draft/recoverable`, `resume`/`discard`) | 13 |
+| F58 | "Use my usual sign-off" (`signoff_phrases` table, `record_signoff_phrase`/`top_signoff_phrase`) | 13 |
+| F57 | Attachment read-aloud (`attachment_reader.py`, `pypdf`/`python-docx`, summary-first over 300 words) | 13 |
+
+## Phase 13 detail
+
+Built in the requested order — F55 → F56 → F58 → F57 — each landing with the full suite
+green before moving to the next, so stopping early at any point would have left a
+complete, working build.
+
+**F55 (voice inbox search):** `backend/ai/search_query.py::parse_search_query()`
+(fake/real dispatch, same pattern as every other `ai/` module) extracts
+`{sender, subject_terms, after, before}` as plain fields only — never a raw query string;
+`backend/gmail/inbox.py::_build_search_query()` is the one place that actually assembles
+the Gmail `q=` string deterministically from them. New `match_search_trigger()` in
+`commands.py` (mirrors `match_cc_trigger`). Results enter `reading_inbox` unchanged, so
+navigation/summarise/reply/archive all keep working on them for free.
+
+**F56 (draft recovery):** confirmed understanding of the "no session id" design before
+building it — single-user app, one honest "most recent unsent draft" answer, no fragile
+client-side id to keep in sync. `backend/data/draft_recovery.py` — a single-row
+`recoverable_draft` table, no `session_id` column. Persisted from inside `_respond()`
+whenever a real draft exists (read as the actual "every mutation" requirement, not
+literally only the undo-stack push points — the gate's own "kill mid-dictation" scenario
+needs the very first compose covered too). Cleared on send, save-as-draft, schedule,
+cancel (="discard"), and restart — found two more real clear points (save-as-draft,
+schedule) beyond the three named in the spec, since a scheduled or already-saved draft
+isn't "unsent" either. `GET /api/draft/recoverable` + a new `"resume"` command; staleness
+past the 12-hour window deletes the row on the spot, same real-delete privacy guarantee as
+an explicit discard.
+
+**F58 ("use my usual sign-off"):** found a real gap while planning — the existing
+`phrases` table (F44) mixes openers and signoffs together as generic bookkeeping, so
+pulling "the most-used signoff" out of it risked returning an opener instead. Added a
+separate `signoff_phrases` table rather than overload the existing one.
+`record_signoff_phrase()` reuses the exact existing `_extract_signoff()` heuristic (last
+non-blank line, ≤60 chars) — not a new, stricter valediction detector. The command pushes
+undo history and speaks only the last two lines (`read_last_lines()`), not a full readback.
+
+**F57 (attachment read-aloud, built last):** added `pypdf`/`python-docx` (+ `lxml`,
+`python-docx`'s own dependency) to `requirements.txt`, both free. New
+`backend/attachment_reader.py::extract_text()` dispatches on extension; unsupported types
+(spreadsheet, presentation, image, archive, or a generic fallback) raise a `SpokenError`
+naming the type rather than failing generically. Over 300 words, `ai/summarize.py`'s
+existing summarizer runs first, with the full text offered on "read it in full" —
+`ConversationState.pending_attachment_text` tracks that pending offer, checked first by
+`READ_FULL`'s existing handler before falling through to its original inbox-message
+meaning.
+
+**Tests:** 47 new (436 total, zero regressions) — real PDF/`.docx` fixtures generated on
+the fly in the test (a minimal valid PDF built with correct byte offsets, not a checked-in
+binary), the 12-hour recovery boundary on both sides, the signoff table's use-count
+ranking, and route-level coverage for every new command.
 
 ## Next up
 
-Phase 12 (F59, recipient-before-compose reorder) — see `PHASE_10_PLUS_SPEC.md` §12.
+Phase 14 (F51, spoken PIN before sending sensitive content) — optional, only if there's
+still time; see `PHASE_10_PLUS_SPEC.md` §14.

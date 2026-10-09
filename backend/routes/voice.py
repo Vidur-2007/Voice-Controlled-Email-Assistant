@@ -20,9 +20,11 @@ from typing import Optional
 from fastapi import APIRouter
 
 from backend.ai import mode_detect
-from backend.ai.compose import compose_email, compose_reply
+from backend.ai.compose import compose_email, compose_reply, extract_recipient_hint
 from backend.ai.edit import revise
+from backend.ai.search_query import parse_search_query
 from backend.ai.summarize import summarize
+from backend.attachment_reader import extract_text
 from backend.attachments import get_last_attachment
 from backend.commands import (
     EDIT_INSTRUCTIONS,
@@ -32,6 +34,7 @@ from backend.commands import (
     match_bcc_trigger,
     match_cc_trigger,
     match_schedule_trigger,
+    match_search_trigger,
     parse_command,
 )
 from backend.config import get_settings
@@ -43,10 +46,18 @@ from backend.data.contacts import (
     resolve_cc_hint,
     resolve_recipient,
 )
-from backend.data.prefs import get_tone_for_recipient, record_phrase, set_tone_for_recipient
+from backend.data.draft_recovery import clear_recoverable_draft, get_recoverable_draft, persist_recoverable_draft
+from backend.data.prefs import (
+    get_tone_for_recipient,
+    record_phrase,
+    record_signoff_phrase,
+    set_tone_for_recipient,
+    top_signoff_phrase,
+)
 from backend.errors import SpokenError, to_spoken
 from backend.events import categorize_error, classify_repair_turn, log_event, set_current_session
 from backend.gmail.inbox import archive, get_my_email, get_thread_context, list_unread, mark_read
+from backend.gmail.inbox import search as search_inbox
 from backend.gmail.schedule import parse_schedule_time, schedule_send
 from backend.gmail.send import save_draft, send_email
 from backend.models import Draft, TurnRequest, TurnResponse
@@ -57,14 +68,18 @@ from backend.speechify import (
     build_full_message_readback,
     build_inbox_listing,
     build_readback,
+    build_search_results_listing,
     describe_inbox_item,
+    normalize_for_speech,
     read_body,
+    read_last_lines,
     read_recipient,
     read_subject,
     speak_schedule_time,
     speakable_email,
     spell_phonetically,
     summarize_draft,
+    word_count,
 )
 from backend.text_correction import strip_correction
 from backend.uncertainty import collect_uncertain_words
@@ -80,6 +95,8 @@ _NOT_YET_AVAILABLE = "That's not available yet. Say help to hear what you can do
 _NO_DRAFT_TO_READ = "There's no message to read yet."
 _NO_DRAFT_TO_CHANGE = "There's no message to change yet. Say something like 'tell John I'll be late' to start one."
 _NOTHING_TO_UNDO = "There's nothing to undo."
+_NOTHING_TO_RESUME = "There's nothing to resume."
+_NO_SIGNOFF_LEARNED = "I haven't learned a sign-off from you yet. Dictate one at the end of a message and I'll remember it."
 _NOTHING_TO_REDO = "There's nothing to redo."
 _DID_NOT_CATCH_MODE_ANSWER = "Sorry, I didn't catch that. " + mode_detect.ASK_MODE_QUESTION
 _OVERRIDE_DICTATION_ACK = "Okay, go ahead — I'll take it down word for word."
@@ -116,6 +133,8 @@ _ATTACH_INSTRUCTION = (
 )
 _ATTACH_BUTTON_ID = "attach-btn"
 _NO_PRIOR_ATTACHMENT = "You haven't attached anything yet this session. Say attach a file to choose one."
+_NO_ATTACHMENT_TO_READ = "You haven't attached anything yet. Say attach a file to choose one."
+_LONG_ATTACHMENT_WORD_THRESHOLD = 300  # F57, §13.4
 _ADD_CC_INSTRUCTION = "Say add cc and then a name, like add cc Sarah, or copy in Sarah."
 _ADD_BCC_INSTRUCTION = "Say add bcc and then a name, like add bcc Sarah."
 _ASK_FORWARD_RECIPIENT = "Forwarding this message. Who would you like to send it to?"
@@ -225,6 +244,11 @@ def _record_personalisation_on_send(draft: Draft) -> None:
         set_tone_for_recipient(draft.recipient, draft.tone)
     record_phrase(_extract_opener(draft.body))
     record_phrase(_extract_signoff(draft.body))
+    # F58 (Phase 13): a SEPARATE, dedicated table from F44's generic
+    # phrases above — see data/prefs.py::record_signoff_phrase's
+    # docstring for why. Same extraction, unconditional on mode (see the
+    # Phase 13 plan's ambiguity #4).
+    record_signoff_phrase(_extract_signoff(draft.body))
 
 
 def _log_draft_created(state: ConversationState, mode: str) -> None:
@@ -304,6 +328,24 @@ def _handle_bcc_trigger(state: ConversationState, hint: str) -> TurnResponse:
     return _respond(state, _speak_readback(state))
 
 
+def _handle_search_trigger(state: ConversationState, query: str) -> TurnResponse:
+    """F55 (Phase 13): "find the email from Priya about the invoice" —
+    same mid-draft guard READ_INBOX already uses (a search can't silently
+    abandon a draft in progress either).
+    """
+    if state.phase in _MID_DRAFT_PHASES:
+        return _respond(state, _INBOX_BLOCKED_MID_DRAFT)
+    try:
+        fields = parse_search_query(query)
+        items = search_inbox(fields, limit=10)
+    except Exception as exc:  # noqa: BLE001 - never fail silently (A5)
+        return _respond(state, to_spoken(exc), ok=False)
+    state.inbox = items
+    state.inbox_index = 0
+    state.phase = "reading_inbox" if items else state.phase
+    return _respond(state, build_search_results_listing(items))
+
+
 def _resolve_schedule_phrase(state: ConversationState, session_id: str, phrase: str) -> TurnResponse:
     """Shared by the initial "schedule this for {phrase}" trigger and the
     follow-up answer once in `awaiting_schedule_time` — both just need a
@@ -335,6 +377,7 @@ def _resolve_schedule_phrase(state: ConversationState, session_id: str, phrase: 
 
     reset_session(session_id)
     state = get_session(session_id)
+    clear_recoverable_draft()  # F56: now queued in `scheduled`, no longer "unsent"
     return _respond(state, speech)
 
 
@@ -350,6 +393,12 @@ def _respond(
     state.last_speech = speech
     if not ok:
         log_event(state.session_id, "error_spoken", phase=state.phase, detail={"category": categorize_error(speech)})
+    # F56 (§13.2): persisted on every turn that ends with a real,
+    # in-progress draft — compose, every edit, CC/BCC, attach — uniformly,
+    # here, rather than chasing each individual mutation call site. No
+    # session id is stored; see draft_recovery.py's module docstring.
+    if state.phase == "awaiting_confirm" and state.draft.body:
+        persist_recoverable_draft(state.draft)
     # F53: a one-shot handoff from _speak_readback(), consumed exactly
     # once here regardless of which branch produced this response.
     segments = state.pending_speech_segments
@@ -412,9 +461,53 @@ def _speak_readback(state: ConversationState, uncertain_words: Optional[set] = N
     return " ".join(seg.text for seg in segments)
 
 
+def _finish_resolved_compose(state: ConversationState, result, uncertain_words: set) -> TurnResponse:
+    """Shared tail for both the F59 pre-compose path and the unchanged
+    fallback below: a draft now exists AND a recipient is resolved —
+    apply it, confirm the phase, read it back.
+    """
+    state.draft.recipient_name = result.name
+    state.draft.recipient = result.email
+    _apply_tone_default(state.draft, result.email)
+    state.phase = "awaiting_confirm"
+    return _respond(state, _speak_readback(state, uncertain_words))
+
+
 def _compose_and_readback(
     state: ConversationState, transcript: str, mode: str, last_interim_transcript: Optional[str] = None
 ) -> TurnResponse:
+    # F59 (Phase 12): try resolving a deterministically-extracted
+    # recipient hint BEFORE composing at all — no model call either way.
+    # "unknown"/"empty" fall straight through to the unchanged path below
+    # (there's no tone to look up and no draft to save by resolving
+    # early), exactly preserving today's behavior for those outcomes.
+    pre_hint = extract_recipient_hint(transcript)
+    if pre_hint:
+        pre_result = resolve_recipient(pre_hint, transcript)
+
+        if pre_result.status == "resolved":
+            tone_hint = get_tone_for_recipient(pre_result.email) if "," not in pre_result.email else None
+            try:
+                draft, _ignored_hint = compose_email(transcript, mode, tone_hint=tone_hint)
+            except SpokenError as exc:
+                return _respond(state, to_spoken(exc), ok=False)
+            state.draft = draft
+            state.mode = mode
+            _log_draft_created(state, mode)
+            uncertain_words = collect_uncertain_words(
+                transcript, last_interim_transcript, pre_hint, known_contact_name_words()
+            )
+            return _finish_resolved_compose(state, pre_result, uncertain_words)
+
+        if pre_result.status == "clarifying":
+            state.candidates = pre_result.candidates
+            state.clarifying_hint = pre_hint
+            state.pending_recipient_transcript = transcript
+            state.mode = mode
+            state.phase = "clarifying"
+            return _respond(state, pre_result.question)
+
+    # --- unchanged fallback: no hint found, or hint found but unresolved ---
     try:
         draft, recipient_hint = compose_email(transcript, mode)
     except SpokenError as exc:
@@ -448,11 +541,7 @@ def _compose_and_readback(
         return _respond(state, result.question)
 
     # resolved (alias, group, or a clean fuzzy winner)
-    state.draft.recipient_name = result.name
-    state.draft.recipient = result.email
-    _apply_tone_default(state.draft, result.email)
-    state.phase = "awaiting_confirm"
-    return _respond(state, _speak_readback(state, uncertain_words))
+    return _finish_resolved_compose(state, result, uncertain_words)
 
 
 def _start_composing(
@@ -557,6 +646,7 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
             _record_personalisation_on_send(state.draft)
             reset_session(session_id)
             state = get_session(session_id)
+            clear_recoverable_draft()
         return _respond(state, result.message, ok=result.success)
 
     if intent == "SAVE_DRAFT":
@@ -569,20 +659,33 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
             # would be misleading. Same reset-on-success pattern as SEND.
             reset_session(session_id)
             state = get_session(session_id)
+            # F56: it's now a real Gmail draft, no longer "unsent" in the
+            # sense recovery cares about — same reasoning as SEND/CANCEL.
+            clear_recoverable_draft()
         return _respond(state, result.message, ok=result.success)
 
     if intent == "RECONNECT":
         return _respond(state, _RECONNECT_MESSAGE)
 
+    if intent == "RESUME_DRAFT":
+        recovered = get_recoverable_draft()
+        if recovered is None:
+            return _respond(state, _NOTHING_TO_RESUME)
+        state.draft = recovered
+        state.phase = "awaiting_confirm"
+        return _respond(state, _speak_readback(state))
+
     if intent == "CANCEL":
         reset_session(session_id)
         state = get_session(session_id)
+        clear_recoverable_draft()
         return _respond(state, _CANCELLED)
 
     if intent == "RESTART":
         prior_phase = state.phase
         reset_session(session_id)
         state = get_session(session_id)
+        clear_recoverable_draft()
         log_event(
             session_id,
             "repair_turn",
@@ -678,6 +781,15 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
         item = state.inbox[state.inbox_index]
         sender_speech = item.sender_name or speakable_email(item.sender_email) or "someone"
         return _respond(state, f"This one is from {sender_speech}.")
+
+    if intent == "READ_FULL" and state.pending_attachment_text:
+        # F57: this READ_FULL is answering the attachment summary-first
+        # offer below, not an inbox message — checked first so it takes
+        # precedence regardless of phase (by now we're back in
+        # awaiting_confirm, not reading_inbox).
+        text = state.pending_attachment_text
+        state.pending_attachment_text = ""
+        return _respond(state, normalize_for_speech(text) or "The attachment has no readable text.")
 
     if intent in ("SUMMARISE", "READ_FULL"):
         if state.phase != "reading_inbox" or not state.inbox:
@@ -828,6 +940,19 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
         state.redo_stack.clear()
         return _respond(state, _speak_readback(state))
 
+    if intent == "USE_SIGNOFF":
+        if state.phase != "awaiting_confirm":
+            return _respond(state, _NEEDS_READY_DRAFT)
+        signoff = top_signoff_phrase()
+        if not signoff:
+            return _respond(state, _NO_SIGNOFF_LEARNED)
+        previous = state.draft.model_copy(deep=True)
+        state.draft.body = state.draft.body.rstrip() + "\n\n" + signoff
+        state.history.append(previous)
+        state.redo_stack.clear()
+        # Not a full readback — just confirm what changed (§13.3).
+        return _respond(state, read_last_lines(state.draft.body))
+
     if intent == "ATTACH":
         if state.phase != "awaiting_confirm":
             return _respond(state, _NEEDS_READY_DRAFT)
@@ -841,6 +966,27 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
             return _respond(state, _NO_PRIOR_ATTACHMENT, focus_target=_ATTACH_BUTTON_ID)
         state.draft.attachments.append(path)
         return _respond(state, _speak_readback(state))
+
+    if intent == "READ_ATTACHMENT":
+        if state.phase != "awaiting_confirm":
+            return _respond(state, _NEEDS_READY_DRAFT)
+        if not state.draft.attachments:
+            return _respond(state, _NO_ATTACHMENT_TO_READ, focus_target=_ATTACH_BUTTON_ID)
+        try:
+            text = extract_text(state.draft.attachments[-1])
+        except Exception as exc:  # noqa: BLE001 - never fail silently (A5)
+            return _respond(state, to_spoken(exc), ok=False)
+
+        wc = word_count(text)
+        if wc > _LONG_ATTACHMENT_WORD_THRESHOLD:
+            summary = summarize(text)
+            state.pending_attachment_text = text
+            return _respond(
+                state,
+                f"This attachment is about {wc} words. Here's a summary: {summary} "
+                "Say 'read it in full' to hear the whole thing.",
+            )
+        return _respond(state, normalize_for_speech(text) or "The attachment has no readable text.")
 
     # REPEAT
     if state.phase == "awaiting_confirm" and state.draft.body:
@@ -925,6 +1071,10 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
     if schedule_phrase is not None:
         return _handle_schedule_trigger(state, req.session_id, schedule_phrase)
 
+    search_query = match_search_trigger(transcript)
+    if search_query is not None:
+        return _handle_search_trigger(state, search_query)
+
     if state.phase == "idle":
         return _start_composing(state, transcript, req.last_interim_transcript)
 
@@ -954,11 +1104,30 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
             return _respond(state, _DID_NOT_CATCH_CLARIFYING_ANSWER.format(question=question))
 
         increment_use_count(matched.email)
+        state.candidates = []
+        state.clarifying_hint = ""
+
+        # F59 (Phase 12): if this clarifying question was asked BEFORE
+        # anything was composed (a deterministic hint resolved to
+        # "clarifying" pre-compose), compose now — with the now-known
+        # recipient's learned tone finally reaching the prompt. Otherwise
+        # (today's original shape) a draft already exists; nothing to do
+        # but attach the resolved recipient to it.
+        if state.pending_recipient_transcript:
+            pending = state.pending_recipient_transcript
+            pending_mode = state.mode or "brief"
+            state.pending_recipient_transcript = ""
+            tone_hint = get_tone_for_recipient(matched.email) if "," not in matched.email else None
+            try:
+                draft, _ignored_hint = compose_email(pending, pending_mode, tone_hint=tone_hint)
+            except SpokenError as exc:
+                return _respond(state, to_spoken(exc), ok=False)
+            state.draft = draft
+            _log_draft_created(state, pending_mode)
+
         state.draft.recipient_name = matched.name
         state.draft.recipient = matched.email
         _apply_tone_default(state.draft, matched.email)
-        state.candidates = []
-        state.clarifying_hint = ""
         state.phase = "awaiting_confirm"
         return _respond(state, _speak_readback(state))
 

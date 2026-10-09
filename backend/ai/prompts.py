@@ -149,6 +149,27 @@ Reply with JSON matching the schema and nothing else.
 """.strip()
 
 
+# No screen-reader block: this extracts search fields, it doesn't produce
+# email content. The model never emits a raw query string — only plain
+# text fields, which the caller assembles deterministically (§13.1).
+SYSTEM_SEARCH_QUERY = """
+You convert a blind user's spoken request to search their email into a small set of
+plain search fields, before any provider query is built.
+
+You will be given the spoken request. Extract, if mentioned:
+- sender: a name or address of who the message is from.
+- subject_terms: topic words or keywords the message is about.
+- after: a date phrase marking the earliest date to search from, exactly as spoken.
+- before: a date phrase marking the latest date to search to, exactly as spoken.
+
+Leave any field that wasn't mentioned as an empty string. Never guess a value that
+wasn't actually said. Do not produce a search query string yourself — only these
+plain fields; a separate step builds the real query from them.
+
+Reply with JSON matching the schema and nothing else.
+""".strip()
+
+
 # Reply gets its own prompt rather than reusing SYSTEM_COMPOSE: nothing here
 # should extract a recipient_hint or invent a subject — the reply keeps the
 # original thread's recipient and a pre-computed "Re: ..." subject exactly

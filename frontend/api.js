@@ -78,6 +78,15 @@ export async function getHealth() {
 }
 
 /**
+ * GET /api/draft/recoverable (F56). Resolves with {recoverable: false} on
+ * failure — a page load must never crash just because this check failed.
+ */
+export async function getRecoverableDraft() {
+  const data = await getJson("/api/draft/recoverable");
+  return data || { recoverable: false };
+}
+
+/**
  * GET /api/prefs (F45). Resolves with the saved prefs, or a default-rate
  * fallback on failure — the rate slider must still work even if this call
  * fails, just without persistence for that page load.

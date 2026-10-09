@@ -21,6 +21,7 @@ from email.utils import getaddresses
 
 from googleapiclient.discovery import build
 
+from backend.ai.schemas import SearchQueryFields
 from backend.config import get_settings
 from backend.errors import to_spoken
 from backend.gmail import auth, fake
@@ -156,6 +157,67 @@ def list_unread(limit: int = 10) -> list[InboxItem]:
                 subject=_header(headers, "Subject"),
                 snippet=msg.get("snippet", ""),
                 unread=True,
+            )
+        )
+    return items
+
+
+def _build_search_query(fields: SearchQueryFields) -> str:
+    """F55 (§13.1) — the ONLY place a Gmail query string is assembled.
+    Only ever built from the model's plain-text fields, never emitted by
+    the model itself.
+    """
+    parts = []
+    if fields.sender:
+        parts.append(f"from:{fields.sender}")
+    if fields.subject_terms:
+        parts.append(f"subject:{fields.subject_terms}")
+    if fields.after:
+        parts.append(f"after:{fields.after}")
+    if fields.before:
+        parts.append(f"before:{fields.before}")
+    return " ".join(parts)
+
+
+def search(fields: SearchQueryFields, limit: int = 10) -> list[InboxItem]:
+    """F55 — unlike list_unread(), not scoped to unread mail (a search
+    isn't "my unread inbox", it's "find this specific message").
+    """
+    settings = get_settings()
+    if settings.fake_gmail:
+        return fake.fake_search(fields, limit)
+
+    query = _build_search_query(fields)
+    service = _build_service()
+    listing = (
+        service.users().messages().list(userId="me", q=query, maxResults=limit).execute()
+    )
+    message_ids = [m["id"] for m in listing.get("messages", [])]
+
+    items: list[InboxItem] = []
+    for message_id in message_ids:
+        msg = (
+            service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=message_id,
+                format="metadata",
+                metadataHeaders=["From", "Subject"],
+            )
+            .execute()
+        )
+        headers = msg.get("payload", {}).get("headers", [])
+        sender_name, sender_email = _parse_sender(_header(headers, "From"))
+        items.append(
+            InboxItem(
+                id=msg["id"],
+                thread_id=msg.get("threadId", ""),
+                sender_name=sender_name,
+                sender_email=sender_email,
+                subject=_header(headers, "Subject"),
+                snippet=msg.get("snippet", ""),
+                unread="UNREAD" in msg.get("labelIds", []),
             )
         )
     return items

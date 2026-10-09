@@ -72,6 +72,16 @@ CREATE TABLE IF NOT EXISTS events (
   ms INTEGER,
   detail TEXT
 );
+CREATE TABLE IF NOT EXISTS recoverable_draft (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  draft_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS signoff_phrases (
+  id INTEGER PRIMARY KEY,
+  text TEXT NOT NULL,
+  use_count INTEGER DEFAULT 0
+);
 """
 
 SEED_FILE = Path(__file__).parent / "seed_contacts.json"

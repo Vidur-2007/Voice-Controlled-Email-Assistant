@@ -33,6 +33,14 @@ class ConversationState(BaseModel):
     # _respond() on the same turn — a transient, one-shot handoff, the
     # same pattern last_speech already uses.
     pending_speech_segments: Optional[list[SpeechSegment]] = None
+    # F59 (Phase 12): set only when "clarifying" is entered BEFORE anything
+    # is composed (a recipient hint was found and resolved first) — "" means
+    # the old shape, where a draft already exists by the time this resolves.
+    pending_recipient_transcript: str = ""
+    # F57 (Phase 13): set when an attachment's full text was summarized
+    # instead of read, so a follow-up "read it in full" knows what to
+    # speak. "" means no such offer is pending.
+    pending_attachment_text: str = ""
 
 
 _sessions: dict[str, ConversationState] = {}

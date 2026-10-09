@@ -29,3 +29,15 @@ class ContactChoice(BaseModel):
 
 class SummaryFields(BaseModel):
     summary: str  # a couple of spoken sentences, not the whole thread
+
+
+class SearchQueryFields(BaseModel):
+    """F55 — the model only extracts plain-text fields; the actual
+    provider query string is always built deterministically from these,
+    never emitted by the model itself (§13.1).
+    """
+
+    sender: str = ""  # a name or address mentioned, "" if none
+    subject_terms: str = ""  # topic/keywords, "" if none
+    after: str = ""  # a date phrase as spoken, "" if none
+    before: str = ""  # a date phrase as spoken, "" if none

@@ -494,6 +494,22 @@ async function init() {
     return;
   }
 
+  // F56: offer draft recovery before the generic "Ready" prompt — saying
+  // both back to back would be a lot to sit through, and "tap to start"
+  // doesn't make sense in the same breath as "say resume or discard".
+  const recoverable = await api.getRecoverableDraft();
+  if (recoverable.recoverable) {
+    logTurn("assistant", recoverable.speech);
+    a11y.announce(recoverable.speech);
+    if (ttsSupported) {
+      // May silently no-op before any user gesture (browser autoplay
+      // policy) — the live-region announcement above still reaches a
+      // screen-reader user regardless.
+      tts.speak(recoverable.speech);
+    }
+    return;
+  }
+
   a11y.announce("Ready.");
   if (ttsSupported) {
     // May silently no-op before any user gesture (browser autoplay policy)

@@ -164,6 +164,40 @@ def fake_list_unread(limit: int) -> list[InboxItem]:
     return items
 
 
+def fake_search(fields, limit: int) -> list[InboxItem]:
+    """F55 — case-insensitive substring match against the fixed seed
+    (not scoped to unread, unlike fake_list_unread — a search isn't "my
+    unread inbox"). `after`/`before` are ignored in fake mode (§13.1's
+    fake-parsing scope limit, see ai/search_query.py).
+    """
+    sender_needle = (fields.sender or "").strip().lower()
+    subject_needle = (fields.subject_terms or "").strip().lower()
+
+    items = []
+    for msg in _FAKE_INBOX_SEED:
+        state = _fake_inbox_state[msg["id"]]
+        if state["archived"]:
+            continue
+        if sender_needle and sender_needle not in msg["sender_name"].lower() and sender_needle not in msg["sender_email"].lower():
+            continue
+        if subject_needle and subject_needle not in msg["subject"].lower():
+            continue
+        items.append(
+            InboxItem(
+                id=msg["id"],
+                thread_id=msg["thread_id"],
+                sender_name=msg["sender_name"],
+                sender_email=msg["sender_email"],
+                subject=msg["subject"],
+                snippet=msg["snippet"],
+                unread=state["unread"],
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
 def fake_get_thread_context(thread_id: str) -> ThreadContext:
     for msg in _FAKE_INBOX_SEED:
         if msg["thread_id"] == thread_id:

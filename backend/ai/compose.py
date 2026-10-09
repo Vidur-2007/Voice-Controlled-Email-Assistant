@@ -45,18 +45,38 @@ def _apply_paragraph_breaks(body: str) -> str:
     return _NEW_PARAGRAPH_RE.sub("\n\n", body).strip()
 
 
-def compose_email(transcript: str, mode: Mode) -> tuple[Draft, str]:
+def extract_recipient_hint(transcript: str) -> str:
+    """F59 (Phase 12) — the exact trigger-word/_split_hint heuristic
+    _fake_compose() already uses internally, exposed standalone so
+    routes/voice.py can try resolving a recipient BEFORE composing, with
+    zero model call. Returns "" if no trigger word matches; the caller
+    falls back to composing first, exactly as before.
+    """
+    words = transcript.strip().split()
+    if not words:
+        return ""
+    first = words[0].lower()
+    if first in _TRIGGER_WORDS:
+        hint, _rest = _split_hint(words[1:])
+        return hint
+    if first == "write" and len(words) > 1 and words[1].lower() == "to":
+        hint, _rest = _split_hint(words[2:])
+        return hint
+    return ""
+
+
+def compose_email(transcript: str, mode: Mode, tone_hint: Optional[str] = None) -> tuple[Draft, str]:
     settings = get_settings()
     if settings.fake_ai:
-        draft, recipient_hint = _fake_compose(transcript)
+        draft, recipient_hint = _fake_compose(transcript, tone_hint)
     else:
-        draft, recipient_hint = _real_compose(transcript, mode)
+        draft, recipient_hint = _real_compose(transcript, mode, tone_hint)
 
     draft.body = _apply_paragraph_breaks(draft.body)
     return draft, recipient_hint
 
 
-def _fake_compose(transcript: str) -> tuple[Draft, str]:
+def _fake_compose(transcript: str, tone_hint: Optional[str] = None) -> tuple[Draft, str]:
     words = transcript.strip().split()
     recipient_hint = ""
     body_words = words
@@ -80,7 +100,7 @@ def _fake_compose(transcript: str) -> tuple[Draft, str]:
     subject_source = body_words or words
     subject = _build_subject(subject_source)
 
-    draft = Draft(subject=subject, body=body, tone="neutral", length="normal")
+    draft = Draft(subject=subject, body=body, tone=tone_hint or "neutral", length="normal")
     return draft, recipient_hint
 
 
@@ -138,7 +158,7 @@ def _build_subject(words: list[str]) -> str:
     return (subject or "Message")[:_SUBJECT_CHAR_LIMIT]
 
 
-def _real_compose(transcript: str, mode: Mode) -> tuple[Draft, str]:
+def _real_compose(transcript: str, mode: Mode, tone_hint: Optional[str] = None) -> tuple[Draft, str]:
     settings = get_settings()
     system = prompts.SYSTEM_DICTATE if mode == "dictation" else prompts.SYSTEM_COMPOSE
 
@@ -148,13 +168,19 @@ def _real_compose(transcript: str, mode: Mode) -> tuple[Draft, str]:
         else "Do not add any sign-off — no name was given."
     )
     user = f"Transcript: {transcript}\n\n{sign_off}"
+    if tone_hint:
+        # F59 (Phase 12): mirrors _real_compose_reply's identical pattern —
+        # a fresh compose's recipient can now be resolved before this call,
+        # so the learned tone can finally reach the prompt, not just be
+        # patched onto the field afterward.
+        user += f"\n\nMatch this tone, since the user usually writes to this person this way: {tone_hint}."
 
     fields = provider.generate(system, user, DraftFields)
 
     draft = Draft(
         subject=(fields.subject.strip() or "Message")[:_SUBJECT_CHAR_LIMIT],
         body=fields.body.strip(),
-        tone=fields.tone,
+        tone=tone_hint or fields.tone,
         length="normal",
     )
     return draft, fields.recipient_hint.strip()

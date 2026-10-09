@@ -121,6 +121,14 @@ class Prefs(BaseModel):
     speech_rate: float = 1.0
 
 
+class RecoverableDraftResponse(BaseModel):
+    """GET /api/draft/recoverable (F56, §13.2)."""
+
+    recoverable: bool
+    draft: Optional[Draft] = None
+    speech: str = ""  # the spoken offer, "" when recoverable is False
+
+
 class DraftComposeRequest(BaseModel):
     """POST /api/draft/compose (§21) — direct access for testing without
     the frontend/session machinery. `mode` is optional; when omitted,

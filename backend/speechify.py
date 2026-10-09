@@ -303,6 +303,49 @@ def build_inbox_listing(items: list[InboxItem]) -> str:
     return " ".join(lines)
 
 
+def read_last_lines(body: str, n: int = 2) -> str:
+    """F58 (Phase 13) — speaks only the last `n` non-blank lines of a
+    body, for "use my usual sign-off"'s confirmation: hearing the change
+    should stay quick, not trigger a full readback.
+    """
+    lines = [line.strip() for line in body.split("\n") if line.strip()]
+    tail = lines[-n:] if lines else []
+    return normalize_for_speech(" ".join(tail)) or "an empty message"
+
+
+def recovery_offer_speech(draft: Draft) -> str:
+    """F56 (Phase 13) — the spoken offer on page load when an unsent
+    draft was recovered. *"You have an unfinished message to John Smith,
+    about twenty words. Say 'resume' to continue, or 'discard'."*
+    """
+    who = draft.recipient_name or speakable_email(draft.recipient) or "someone"
+    wc = word_count(draft.body)
+    return (
+        f"You have an unfinished message to {who}, about {wc} words. "
+        "Say 'resume' to continue, or 'discard'."
+    )
+
+
+_NO_SEARCH_MATCHES = "I couldn't find any message matching that. Try naming just the sender."
+
+
+def build_search_results_listing(items: list[InboxItem]) -> str:
+    """F55 (Phase 13) — spoken response to a search. Unlike
+    build_inbox_listing(), only the count and the FIRST result are
+    spoken up front (§13.1's own example: "Three messages match. The
+    first is from Priya Sharma, subject: March invoice."); "next email"
+    etc. still work on the rest once in reading_inbox phase.
+    """
+    if not items:
+        return _NO_SEARCH_MATCHES
+
+    count_speech = "One message matches" if len(items) == 1 else f"{len(items)} messages match"
+    first = items[0]
+    sender_speech = first.sender_name or speakable_email(first.sender_email) or "someone"
+    subject_speech = normalize_for_speech(first.subject) or "no subject"
+    return f"{count_speech}. The first is from {sender_speech}, subject: {subject_speech}."
+
+
 def build_full_message_readback(thread_text: str) -> str:
     """Spoken response to "read it in full" (F38) — the whole thread's
     text, with the same long-message word-count warning as build_readback
