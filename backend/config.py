@@ -38,6 +38,7 @@ class Settings(BaseModel):
     log_content: bool = False  # F54 — see the privacy rule in PHASE_10_PLUS_SPEC.md §10.2.
     # Default OFF. Only a consented study session should ever set this to 1.
     enhanced_readback: bool = False  # F53 — mandatory A/B toggle (§11.3). 0 = today's plain readback.
+    send_pin: str = ""  # F51 (Phase 14, optional) — "" disables the feature entirely.
 
 
 @lru_cache
@@ -63,4 +64,5 @@ def get_settings() -> Settings:
         scheduler_poll_s=int(os.getenv("SCHEDULER_POLL_S", "30")),
         log_content=os.getenv("LOG_CONTENT", "0") == "1",
         enhanced_readback=os.getenv("ENHANCED_READBACK", "0") == "1",
+        send_pin=os.getenv("SEND_PIN", ""),
     )

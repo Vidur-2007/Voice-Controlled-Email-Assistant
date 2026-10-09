@@ -12,7 +12,7 @@ table below at the end of every phase, so a lost session costs one file read.
 | 11 | F52 (phonetic spell-out), F53 (confidence-flagged readback) | **Done** |
 | 12 | F59 (recipient-before-compose reorder) | **Done** |
 | 13 | F55/F56/F58/F57 (search, draft recovery, sign-off, attachment read-aloud) | **Done** |
-| 14 | F51 (spoken PIN) — optional | Not started |
+| 14 | F51 (spoken PIN) — optional | **Done** |
 
 ## Phase 10 detail
 
@@ -192,7 +192,43 @@ the fly in the test (a minimal valid PDF built with correct byte offsets, not a 
 binary), the 12-hour recovery boundary on both sides, the signoff table's use-count
 ranking, and route-level coverage for every new command.
 
+## Phase 14 detail (optional — F51 spoken PIN)
+
+Off entirely unless `SEND_PIN` is set — zero behavior change for anyone who hasn't
+configured it, same pattern as `LOG_CONTENT`/`ENHANCED_READBACK`.
+
+- `backend/sensitive_content.py::contains_sensitive_markers()` — deterministic: the
+  keywords "password"/"OTP", or a loosely-formatted run of 7+ digits (covers both a bare
+  account number and a card-like number with spaces/hyphens). Checked against the draft's
+  subject+body at SEND time, before the real `send_email()` call.
+- New `Phase` value `"awaiting_pin"`; `parse_spoken_pin()` accepts literal digits, spoken
+  digit words ("one two three four"), or a mix — never guesses at a wrong-length attempt.
+  A malformed answer re-asks without burning one of the 3 attempts; a valid-but-wrong one
+  does.
+- Three wrong attempts refuses the send and says so plainly, but **keeps the draft** —
+  the user can double-check the PIN and try "send" again, or edit/cancel normally.
+  `_perform_send()` is the actual send logic, extracted once and shared by both the
+  no-PIN-needed path and the correct-PIN path, so neither can drift from the other.
+- `awaiting_pin` added to the existing mid-draft guard (blocks reading the inbox/searching
+  away from a pending PIN prompt, same as every other in-progress-draft phase).
+- **README honesty requirement**: added an explicit "Known limitations" entry and a
+  `.env.example`/config-table note stating plainly that a spoken PIN is a speed bump, not
+  authentication — audible to anyone in the room, which is exactly the threat model it
+  would appear to address. Also fixed a stale README sentence left over from Phase 9
+  that still claimed the spoken PIN wasn't built.
+- While touching the config table, also documented `LOG_CONTENT`/`ENHANCED_READBACK`
+  (Phases 10/11), which had never been added there.
+- 19 new tests (455 total, zero regressions): marker/PIN-parsing unit tests, and
+  route-level coverage for disabled-by-default, non-sensitive-never-prompts, correct-PIN,
+  three-wrong-attempts, a garbled non-attempt not burning a try, cancel-during-PIN, and
+  the mid-draft guard.
+
+## F-table addition (cont'd)
+
+| ID | Feature | Phase |
+|---|---|---|
+| F51 | Spoken PIN before sending sensitive content, optional (`sensitive_content.py`, `awaiting_pin` phase) | 14 |
+
 ## Next up
 
-Phase 14 (F51, spoken PIN before sending sensitive content) — optional, only if there's
-still time; see `PHASE_10_PLUS_SPEC.md` §14.
+All of Phases 10–14 are now done. Nothing left on `PHASE_10_PLUS_SPEC.md`'s roadmap.

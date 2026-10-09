@@ -15,6 +15,7 @@ Phase = Literal[
     "awaiting_confirm",  # readback done, waiting for "send"
     "reading_inbox",  # navigating messages
     "awaiting_schedule_time",  # asked what time to schedule a send for (F35)
+    "awaiting_pin",  # F51 (Phase 14) — asked for the spoken PIN before a sensitive send
 ]
 
 Tone = Literal["neutral", "formal", "friendly", "firm", "apologetic"]

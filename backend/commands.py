@@ -388,6 +388,8 @@ def help_speech(phase: Phase) -> str:
             "Say what time you'd like this sent, like 5 PM, or tomorrow "
             "at 9 AM, or cancel to discard the draft."
         )
+    if phase == "awaiting_pin":
+        return "Say your 4-digit PIN to confirm sending, or say cancel to stop."
     return (
         "You can start by saying something like 'tell John I'll be late' "
         "and I'll compose it for you. You can also say cancel, start over, "

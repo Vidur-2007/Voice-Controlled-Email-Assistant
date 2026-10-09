@@ -61,6 +61,7 @@ from backend.gmail.inbox import search as search_inbox
 from backend.gmail.schedule import parse_schedule_time, schedule_send
 from backend.gmail.send import save_draft, send_email
 from backend.models import Draft, TurnRequest, TurnResponse
+from backend.sensitive_content import contains_sensitive_markers, parse_spoken_pin
 from backend.session import ConversationState, get_session, reset_session
 from backend.speechify import (
     build_disambiguation_question,
@@ -88,6 +89,13 @@ router = APIRouter()
 
 _CATCH_NOTHING_HEARD = "I didn't catch that. Could you say it again?"
 _SEND_TOO_EARLY = "I haven't read the message back to you yet. Say 'read it back' first."
+_ASK_FOR_PIN = (
+    "This message looks like it might contain sensitive information. "
+    "Please say your 4-digit PIN to confirm sending."
+)
+_PIN_DIDNT_CATCH = "I need a 4-digit PIN to send this. Please say the 4 digits now, or say cancel."
+_PIN_STILL_PENDING = "I'm still waiting for your 4-digit PIN. Please say it now, or say cancel."
+_PIN_FAILED_THREE_TIMES = "That PIN didn't match three times, so I haven't sent this. Your draft is safe."
 _CANCELLED = "Cancelled. Nothing was sent."
 _RESTARTED = "Okay, starting over. Say something like 'tell John I'll be late' whenever you're ready."
 _ASK_WHO = "Who should I send this to?"
@@ -119,7 +127,14 @@ _ASK_REPLY_CONTENT = "What would you like to say?"
 # READ_INBOX is refused in any phase where a draft is genuinely in progress
 # — the same guard SEND already applies, so "read my unread mail" can never
 # silently abandon whatever was being composed.
-_MID_DRAFT_PHASES = {"awaiting_confirm", "clarifying", "awaiting_address", "awaiting_mode", "review"}
+_MID_DRAFT_PHASES = {
+    "awaiting_confirm",
+    "clarifying",
+    "awaiting_address",
+    "awaiting_mode",
+    "review",
+    "awaiting_pin",
+}
 
 # CC/attach/attach-last/schedule (Phase 7) are all only meaningful once a
 # draft has been composed AND read back — same guard style as SEND/SAVE_DRAFT.
@@ -619,35 +634,62 @@ def _apply_edit(
     return _respond(state, _speak_readback(state))
 
 
+def _send_pin_required(draft: Draft) -> bool:
+    """F51 (Phase 14, optional) — off entirely unless SEND_PIN is set."""
+    settings = get_settings()
+    if not settings.send_pin:
+        return False
+    return contains_sensitive_markers(f"{draft.subject} {draft.body}")
+
+
+def _pin_wrong_message(remaining: int) -> str:
+    tries = "try" if remaining == 1 else "tries"
+    return f"That PIN didn't match. You have {remaining} more {tries}."
+
+
+def _perform_send(state: ConversationState, session_id: str) -> TurnResponse:
+    """The actual send — shared by the no-PIN-needed path and the
+    correct-PIN path below, so both go through identical logging/
+    personalisation/cleanup.
+    """
+    log_event(
+        session_id,
+        "send_confirmed",
+        phase=state.phase,
+        detail={},
+        content={"recipient": state.draft.recipient},
+    )
+    start = time.monotonic()
+    result = send_email(state.draft)
+    log_event(
+        session_id,
+        "send_result",
+        phase=state.phase,
+        ms=int((time.monotonic() - start) * 1000),
+        detail={
+            "success": result.success,
+            "error_category": None if result.success else categorize_error(result.message),
+        },
+    )
+    if result.success:
+        _record_personalisation_on_send(state.draft)
+        reset_session(session_id)
+        state = get_session(session_id)
+        clear_recoverable_draft()
+    return _respond(state, result.message, ok=result.success)
+
+
 def _handle_command(state: ConversationState, session_id: str, intent: str) -> TurnResponse:
     if intent == "SEND":
+        if state.phase == "awaiting_pin":
+            return _respond(state, _PIN_STILL_PENDING)
         if state.phase != "awaiting_confirm":
             return _respond(state, _SEND_TOO_EARLY)
-        log_event(
-            session_id,
-            "send_confirmed",
-            phase=state.phase,
-            detail={},
-            content={"recipient": state.draft.recipient},
-        )
-        start = time.monotonic()
-        result = send_email(state.draft)
-        log_event(
-            session_id,
-            "send_result",
-            phase=state.phase,
-            ms=int((time.monotonic() - start) * 1000),
-            detail={
-                "success": result.success,
-                "error_category": None if result.success else categorize_error(result.message),
-            },
-        )
-        if result.success:
-            _record_personalisation_on_send(state.draft)
-            reset_session(session_id)
-            state = get_session(session_id)
-            clear_recoverable_draft()
-        return _respond(state, result.message, ok=result.success)
+        if _send_pin_required(state.draft):
+            state.phase = "awaiting_pin"
+            state.pin_attempts = 0
+            return _respond(state, _ASK_FOR_PIN)
+        return _perform_send(state, session_id)
 
     if intent == "SAVE_DRAFT":
         if state.phase != "awaiting_confirm":
@@ -1055,6 +1097,23 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
     # redundantly-restated "schedule this for" prefix).
     if state.phase == "awaiting_schedule_time":
         return _resolve_schedule_phrase(state, req.session_id, transcript)
+
+    # F51 (Phase 14): checked the same way as awaiting_schedule_time above
+    # — once dedicated to collecting a PIN, every non-command transcript
+    # is a PIN attempt, never a CC/BCC/search trigger.
+    if state.phase == "awaiting_pin":
+        pin = parse_spoken_pin(transcript)
+        if pin is None:
+            return _respond(state, _PIN_DIDNT_CATCH)
+        settings = get_settings()
+        if pin == settings.send_pin:
+            return _perform_send(state, req.session_id)
+        state.pin_attempts += 1
+        if state.pin_attempts >= 3:
+            state.phase = "awaiting_confirm"
+            state.pin_attempts = 0
+            return _respond(state, _PIN_FAILED_THREE_TIMES, ok=False)
+        return _respond(state, _pin_wrong_message(3 - state.pin_attempts), ok=False)
 
     # F29/F35: free-form content (a name, a time) can never be a literal
     # _PHRASES key — these are prefix-matched separately, the same way

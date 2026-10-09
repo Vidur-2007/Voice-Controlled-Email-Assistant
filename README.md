@@ -71,6 +71,9 @@ conftest.py` forcing `FAKE_AI=1`/`FAKE_GMAIL=1`/an in-memory database before any
 | `SCHEDULER_POLL_S` | `30` | How often the scheduled-send background thread checks for due sends (F35). |
 | `SILENCE_STOP_MS` | `0` | `0` disables auto-stop on silence (F10); `2500` is the recommended value if enabled. |
 | `USER_FIRST_NAME` | empty | Used for email sign-offs. Empty means no sign-off — never a `[Your Name]` placeholder. |
+| `LOG_CONTENT` | `0` | `1` lets F54's instrumentation log real bodies/subjects/addresses — only for a consented study session. See Known limitations. |
+| `ENHANCED_READBACK` | `0` | `1` turns on F53's confidence-flagged readback (NATO spelling, uncertain-word marking). `0` is byte-identical to the original plain readback. |
+| `SEND_PIN` | empty | **Optional, F51.** A 4-digit PIN requested before sending a draft containing a password/OTP/account-number-like marker. Empty disables the feature entirely. See Known limitations — **this is a speed bump, not authentication.** |
 
 ## Gmail setup (for real sending — optional)
 
@@ -203,11 +206,20 @@ This app is built audio-first, not as a visual email client with voice bolted on
   Browsers throttle or block `SpeechRecognition` from restarting in a backgrounded or
   minimized tab — a real, documented browser limitation, not a bug in this app. See the
   Wake word section below for the full set of wake-word-specific limitations.
+- **The spoken PIN (`SEND_PIN`, F51) is a speed bump, not authentication, and is described
+  that way on purpose, not undersold.** A PIN spoken aloud is audible to anyone in the
+  room — exactly the threat model it would appear to address. It only slows down an
+  accidental "send" on a message containing something that looks sensitive (a password,
+  an OTP, an account- or card-like run of digits); it does not protect against someone
+  who can hear you. Disabled by default (`SEND_PIN` empty).
 
 ## Wake word ("hey ultron") — F11, Phase 9 stretch
 
-Phase 9 is the spec's final, optional stretch phase (F11 wake word, F51 a spoken PIN —
-"do one, well, or neither"). The wake word is built; the spoken PIN is not.
+Phase 9 originally offered F11 (wake word) and F51 (a spoken PIN) as alternative,
+"do one, well, or neither" stretch goals. Both ended up built: the wake word here, and
+the spoken PIN later, as its own optional phase (F51, `PHASE_10_PLUS_SPEC.md` §14) — see
+Known limitations above for why it's deliberately described as a speed bump, not
+authentication.
 
 **Opt-in, off by default.** Tap "Enable wake word" in the action row. The first time you
 turn it on, the app speaks a full disclosure, in full, before anything else — this is a

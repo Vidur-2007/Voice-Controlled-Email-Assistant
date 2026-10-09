@@ -41,6 +41,9 @@ class ConversationState(BaseModel):
     # instead of read, so a follow-up "read it in full" knows what to
     # speak. "" means no such offer is pending.
     pending_attachment_text: str = ""
+    # F51 (Phase 14, optional) — wrong-PIN attempts against the current
+    # pending send; reset once back to awaiting_confirm.
+    pin_attempts: int = 0
 
 
 _sessions: dict[str, ConversationState] = {}
