@@ -33,6 +33,9 @@ from backend.commands import (
     help_speech,
     match_bcc_trigger,
     match_cc_trigger,
+    match_change_recipient,
+    match_reply_all_trigger,
+    match_reply_trigger,
     match_schedule_trigger,
     match_search_trigger,
     parse_command,
@@ -56,6 +59,7 @@ from backend.data.prefs import (
 )
 from backend.errors import SpokenError, to_spoken
 from backend.events import categorize_error, classify_repair_turn, log_event, set_current_session
+from backend.gmail.drafts import list_drafts, send_draft
 from backend.gmail.inbox import archive, get_my_email, get_thread_context, list_unread, mark_read
 from backend.gmail.inbox import search as search_inbox
 from backend.gmail.schedule import parse_schedule_time, schedule_send
@@ -65,11 +69,13 @@ from backend.sensitive_content import contains_sensitive_markers, parse_spoken_p
 from backend.session import ConversationState, get_session, reset_session
 from backend.speechify import (
     build_disambiguation_question,
+    build_drafts_listing,
     build_enhanced_readback,
     build_full_message_readback,
     build_inbox_listing,
     build_readback,
     build_search_results_listing,
+    describe_draft_item,
     describe_inbox_item,
     normalize_for_speech,
     read_body,
@@ -123,6 +129,14 @@ _INBOX_BLOCKED_MID_DRAFT = (
 _AT_LAST_EMAIL = "That's the last message."
 _AT_FIRST_EMAIL = "That's the first message."
 _ASK_REPLY_CONTENT = "What would you like to say?"
+_NO_DRAFTS_LOADED = "You haven't opened your drafts yet. Say 'read my drafts' to start."
+_NO_DRAFTS_SAVED = "You don't have any saved drafts."
+_AT_LAST_DRAFT = "That's the last draft."
+_AT_FIRST_DRAFT = "That's the first draft."
+_MULTIPLE_DRAFTS_AMBIGUOUS = (
+    "You have {n} saved drafts. Say 'read my drafts' to hear them, "
+    "then 'send' once you're on the one you want."
+)
 
 # READ_INBOX is refused in any phase where a draft is genuinely in progress
 # — the same guard SEND already applies, so "read my unread mail" can never
@@ -155,19 +169,105 @@ _ADD_BCC_INSTRUCTION = "Say add bcc and then a name, like add bcc Sarah."
 _ASK_FORWARD_RECIPIENT = "Forwarding this message. Who would you like to send it to?"
 
 
-def _resolve_recipient_stub(hint: str) -> tuple[str, str]:
-    """F16's permissive escape hatch, used only inside `awaiting_address`.
+_SPOKEN_EMAIL_WORD_SYMBOLS = {"dot": ".", "underscore": "_", "hyphen": "-", "dash": "-"}
 
-    Accepts any spoken name and manufactures a placeholder address —
-    "accept a spelled-out or dictated address" per F16, without building
-    real address-string parsing (e.g. "priya at gmail dot com"), which is
-    a deliberate, explicit scope limit for this phase, not an oversight.
+
+def _join_spoken_email_part(raw: str) -> str:
+    """Concatenates a local-part or domain-part's words with NO
+    separator, except where the user actually said "dot"/"underscore"/
+    "hyphen" as its own word — that becomes a literal character instead
+    of being concatenated as text. A token that already arrived fully
+    formed (Chrome's own speech-recognition smart-formatting, e.g. a
+    spoken "one point oh" transcribed as "1.0") passes through unchanged.
+    """
+    tokens = raw.strip().lower().split()
+    return "".join(_SPOKEN_EMAIL_WORD_SYMBOLS.get(t, t) for t in tokens)
+
+
+def _parse_spoken_email(hint: str) -> Optional[tuple[str, str]]:
+    """Bug fix: a spoken address must become a real one, not a
+    slugified placeholder — in EITHER shape observed live:
+      - spoken as words: "vidur bandaru at gmail dot com"
+      - partly smart-formatted by Chrome's own speech recognition
+        already, mid-utterance: "...VVS mini project 1.0@gmail.com"
+    Splits at whichever anchor is actually present — a literal "@" takes
+    priority (it's unambiguous) over the spoken word "at". Returns
+    (display_name, email), or None if neither anchor is present at all.
+    """
+    stripped = hint.strip()
+    if "@" in stripped:
+        local_raw, _, domain_raw = stripped.partition("@")
+    else:
+        words = stripped.split()
+        low_words = [w.lower() for w in words]
+        if "at" not in low_words:
+            return None
+        at_index = low_words.index("at")
+        local_raw = " ".join(words[:at_index])
+        domain_raw = " ".join(words[at_index + 1 :])
+
+    local = _join_spoken_email_part(local_raw)
+    domain = _join_spoken_email_part(domain_raw)
+    if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        return None  # doesn't resolve to a plausible address shape
+
+    # For display only: the spoken words minus the symbol markers
+    # themselves ("dot" shouldn't show up as a literal word in "To Vidur
+    # Dot Bandaru").
+    display_tokens = [t for t in local_raw.strip().split() if t.lower() not in _SPOKEN_EMAIL_WORD_SYMBOLS]
+    display_name = " ".join(display_tokens).title() if display_tokens else local
+    return display_name, f"{local}@{domain}"
+
+
+def _resolve_recipient_stub(hint: str) -> tuple[str, str]:
+    """F16's permissive escape hatch, used only as the last resort.
+
+    Tries a spoken-email parse first (see `_parse_spoken_email`) — a
+    real address the user is reading out loud must become that real
+    address, not a fake "@example.com" placeholder. Only when that
+    doesn't apply does this fall back to the original F16 behavior:
+    accept any spoken name and manufacture a placeholder address.
     """
     hint = hint.strip()
     if not hint:
         return "", ""
+    parsed = _parse_spoken_email(hint)
+    if parsed:
+        return parsed
     slug = re.sub(r"[^a-z0-9]+", ".", hint.lower()).strip(".") or "contact"
     return hint.title(), f"{slug}@example.com"
+
+
+def _finish_awaiting_address(state: ConversationState, name: str, email: str) -> TurnResponse:
+    state.draft.recipient_name = name
+    state.draft.recipient = email
+    _apply_tone_default(state.draft, email)
+    state.phase = "awaiting_confirm"
+    return _respond(state, _speak_readback(state))
+
+
+def _resolve_address_answer(state: ConversationState, hint: str) -> TurnResponse:
+    """Shared by three call sites that all need the exact same
+    resolution order: the initial "who should this go to" answer,
+    "change recipient" + a follow-up turn, and "change recipient to X"
+    said as one utterance. Spoken-email parse first, then a real
+    contact lookup (so naming someone new, or a known contact, works
+    too — not just the permissive placeholder stub).
+    """
+    parsed = _parse_spoken_email(hint)
+    if parsed:
+        return _finish_awaiting_address(state, *parsed)
+
+    result = resolve_recipient(hint, hint)
+    if result.status == "resolved":
+        return _finish_awaiting_address(state, result.name, result.email)
+    if result.status == "clarifying":
+        state.candidates = result.candidates
+        state.clarifying_hint = hint
+        state.phase = "clarifying"
+        return _respond(state, result.question)
+
+    return _finish_awaiting_address(state, *_resolve_recipient_stub(hint))
 
 
 def _unknown_contact_message(hint: str) -> str:
@@ -296,6 +396,28 @@ def _try_mark_read(message_id: str) -> None:
         pass
 
 
+def _send_draft_by_id(state: ConversationState, draft_id: str) -> TurnResponse:
+    """Shared by SEND_DRAFT's direct shortcut (state.drafts may be empty
+    — it's never populated for the single-draft auto-send case) and the
+    phase-aware SEND intent while actually browsing (`reading_drafts`).
+    Removing by id, not by the current browse index, since the browse
+    index and the id just sent may have diverged by navigation.
+    """
+    result = send_draft(draft_id)
+    if not result.success:
+        return _respond(state, result.message, ok=False)
+
+    state.drafts = [d for d in state.drafts if d.id != draft_id]
+    if state.phase == "reading_drafts":
+        if not state.drafts:
+            state.draft_browse_index = 0
+            state.phase = "idle"
+            return _respond(state, f"{result.message} Your drafts are empty now.")
+        if state.draft_browse_index >= len(state.drafts):
+            state.draft_browse_index = len(state.drafts) - 1
+    return _respond(state, result.message)
+
+
 def _handle_cc_trigger(state: ConversationState, hint: str) -> TurnResponse:
     """F29: "copy in Sarah" / "add cc Sarah". Deliberately scoped to
     deterministic-only resolution — an ambiguous hint is a flat, spoken
@@ -359,6 +481,57 @@ def _handle_search_trigger(state: ConversationState, query: str) -> TurnResponse
     state.inbox_index = 0
     state.phase = "reading_inbox" if items else state.phase
     return _respond(state, build_search_results_listing(items))
+
+
+def _fill_reply_content(state: ConversationState, content: str) -> TurnResponse:
+    """Shared by the "review" phase's follow-up turn and
+    "reply <content>"/"reply all <content>" said as one utterance below
+    — both just need the reply composed and the draft finished. Never
+    routed through edit.py::revise() — that expects an existing body
+    plus a change instruction, and a reply's body starts empty, so that
+    would produce nonsense.
+    """
+    try:
+        thread_text = get_thread_context(state.draft.thread_id or "").text
+        # Only a REAL learned default counts as a hint — "neutral" is
+        # also the Draft model's own untouched default, so passing it
+        # through would be indistinguishable from "no hint" anyway.
+        tone_hint = state.draft.tone if state.draft.tone != "neutral" else None
+        reply_draft = compose_reply(content, thread_text, tone_hint=tone_hint)
+    except Exception as exc:  # noqa: BLE001
+        return _respond(state, to_spoken(exc), ok=False)
+    state.draft.body = reply_draft.body
+    state.draft.tone = reply_draft.tone
+    state.draft.length = reply_draft.length
+    state.phase = "awaiting_confirm"
+    _log_draft_created(state, "reply")
+    return _respond(state, _speak_readback(state))
+
+
+def _handle_reply_trigger(state: ConversationState, session_id: str, content: str, intent: str) -> TurnResponse:
+    """Bug fix: "reply tell them I'll be late" / "reply all ..." said as
+    one utterance, instead of only as a bare command followed by a
+    separate turn for the content. Reuses REPLY/REPLY_ALL's own existing
+    setup unchanged (via _handle_command) — only adds filling in the
+    content immediately once that setup succeeds.
+    """
+    setup_response = _handle_command(state, session_id, intent)
+    if state.phase != "review":
+        return setup_response  # setup itself failed (no inbox, etc.) — surface that instead
+    return _fill_reply_content(state, content)
+
+
+def _handle_change_recipient_trigger(state: ConversationState, new_value: str) -> TurnResponse:
+    """Bug fix: "change recipient" (bare) or "change the recipient to X"
+    (or any ASR mis-hearing of "recipient" close enough to still match,
+    see match_change_recipient()) said as one utterance either way.
+    """
+    if state.phase != "awaiting_confirm":
+        return _respond(state, _NEEDS_READY_DRAFT)
+    if not new_value:
+        state.phase = "awaiting_address"
+        return _respond(state, _ASK_WHO)
+    return _resolve_address_answer(state, new_value)
 
 
 def _resolve_schedule_phrase(state: ConversationState, session_id: str, phrase: str) -> TurnResponse:
@@ -683,6 +856,14 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
     if intent == "SEND":
         if state.phase == "awaiting_pin":
             return _respond(state, _PIN_STILL_PENDING)
+        if state.phase == "reading_drafts":
+            # "send"/"send it" overloaded to mean "send the draft I'm
+            # currently browsing" here, the same way REPEAT/READ_FULL
+            # already vary by phase elsewhere in this file.
+            if not state.drafts:
+                return _respond(state, _NO_DRAFTS_LOADED)
+            item = state.drafts[state.draft_browse_index]
+            return _send_draft_by_id(state, item.id)
         if state.phase != "awaiting_confirm":
             return _respond(state, _SEND_TOO_EARLY)
         if _send_pin_required(state.draft):
@@ -861,6 +1042,49 @@ def _handle_command(state: ConversationState, session_id: str, intent: str) -> T
         if state.inbox_index >= len(state.inbox):
             state.inbox_index = len(state.inbox) - 1
         return _respond(state, f"Archived. {describe_inbox_item(state.inbox[state.inbox_index])}")
+
+    if intent == "READ_DRAFTS":
+        if state.phase in _MID_DRAFT_PHASES:
+            return _respond(state, _INBOX_BLOCKED_MID_DRAFT)
+        try:
+            items = list_drafts(limit=10)
+        except Exception as exc:  # noqa: BLE001 - never fail silently (A5)
+            return _respond(state, to_spoken(exc), ok=False)
+        state.drafts = items
+        state.draft_browse_index = 0
+        state.phase = "reading_drafts" if items else "idle"
+        return _respond(state, build_drafts_listing(items))
+
+    if intent in ("NEXT_DRAFT", "PREV_DRAFT"):
+        if state.phase != "reading_drafts" or not state.drafts:
+            return _respond(state, _NO_DRAFTS_LOADED)
+        if intent == "NEXT_DRAFT":
+            if state.draft_browse_index >= len(state.drafts) - 1:
+                return _respond(state, _AT_LAST_DRAFT)
+            state.draft_browse_index += 1
+        else:
+            if state.draft_browse_index <= 0:
+                return _respond(state, _AT_FIRST_DRAFT)
+            state.draft_browse_index -= 1
+        return _respond(state, describe_draft_item(state.drafts[state.draft_browse_index]))
+
+    if intent == "SEND_DRAFT":
+        # A direct shortcut that works from anywhere, without first
+        # saying "read my drafts" — but only unambiguous: exactly one
+        # saved draft. More than one, and guessing which is meant would
+        # risk sending the wrong message, so it asks the user to browse
+        # instead (mirrors _MULTIPLE_DRAFTS_AMBIGUOUS's own wording).
+        if state.phase in _MID_DRAFT_PHASES:
+            return _respond(state, _INBOX_BLOCKED_MID_DRAFT)
+        try:
+            items = list_drafts(limit=10)
+        except Exception as exc:  # noqa: BLE001
+            return _respond(state, to_spoken(exc), ok=False)
+        if not items:
+            return _respond(state, _NO_DRAFTS_SAVED)
+        if len(items) > 1:
+            return _respond(state, _MULTIPLE_DRAFTS_AMBIGUOUS.format(n=len(items)))
+        return _send_draft_by_id(state, items[0].id)
 
     if intent == "MARK_READ":
         if state.phase != "reading_inbox" or not state.inbox:
@@ -1134,6 +1358,21 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
     if search_query is not None:
         return _handle_search_trigger(state, search_query)
 
+    change_recipient_value = match_change_recipient(transcript)
+    if change_recipient_value is not None:
+        return _handle_change_recipient_trigger(state, change_recipient_value)
+
+    # REPLY_ALL's triggers are checked first — more specific, so "reply
+    # all ..." is never swallowed by the bare "reply " prefix below as if
+    # "all ..." were the reply's own content.
+    reply_all_content = match_reply_all_trigger(transcript)
+    if reply_all_content is not None:
+        return _handle_reply_trigger(state, req.session_id, reply_all_content, "REPLY_ALL")
+
+    reply_content = match_reply_trigger(transcript)
+    if reply_content is not None:
+        return _handle_reply_trigger(state, req.session_id, reply_content, "REPLY")
+
     if state.phase == "idle":
         return _start_composing(state, transcript, req.last_interim_transcript)
 
@@ -1191,12 +1430,7 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
         return _respond(state, _speak_readback(state))
 
     if state.phase == "awaiting_address":
-        recipient_name, recipient = _resolve_recipient_stub(transcript)
-        state.draft.recipient_name = recipient_name
-        state.draft.recipient = recipient
-        _apply_tone_default(state.draft, recipient)
-        state.phase = "awaiting_confirm"
-        return _respond(state, _speak_readback(state))
+        return _resolve_address_answer(state, transcript)
 
     if state.phase == "awaiting_confirm":
         # Not a known command (checked above) and not a grammar-matched
@@ -1205,25 +1439,8 @@ def _handle_turn(req: TurnRequest) -> TurnResponse:
         return _apply_edit(state, transcript)
 
     if state.phase == "review":
-        # A reply-in-progress: the transcript IS the reply content. Fed
-        # straight into compose_reply(), never through edit.py::revise()
-        # — revise() expects an existing body plus a change instruction,
-        # and a reply's body starts empty, so that would produce nonsense.
-        try:
-            thread_text = get_thread_context(state.draft.thread_id or "").text
-            # Only a REAL learned default counts as a hint — "neutral" is
-            # also the Draft model's own untouched default, so passing it
-            # through would be indistinguishable from "no hint" anyway.
-            tone_hint = state.draft.tone if state.draft.tone != "neutral" else None
-            reply_draft = compose_reply(transcript, thread_text, tone_hint=tone_hint)
-        except Exception as exc:  # noqa: BLE001
-            return _respond(state, to_spoken(exc), ok=False)
-        state.draft.body = reply_draft.body
-        state.draft.tone = reply_draft.tone
-        state.draft.length = reply_draft.length
-        state.phase = "awaiting_confirm"
-        _log_draft_created(state, "reply")
-        return _respond(state, _speak_readback(state))
+        # A reply-in-progress: the transcript IS the reply content.
+        return _fill_reply_content(state, transcript)
 
     # reading_inbox: everything reachable here is a grammar-matched command
     # (handled above via _handle_command), so free text that falls through

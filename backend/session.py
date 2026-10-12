@@ -8,7 +8,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from backend.models import ContactCandidate, Draft, InboxItem, Phase, SpeechSegment
+from backend.models import ContactCandidate, Draft, DraftSummary, InboxItem, Phase, SpeechSegment
 
 
 class ConversationState(BaseModel):
@@ -24,6 +24,10 @@ class ConversationState(BaseModel):
     last_speech: str = ""  # for "repeat that"
     inbox: list[InboxItem] = []
     inbox_index: int = 0
+    # Saved-Gmail-drafts browsing (Phase 15) — same navigation shape as
+    # inbox/inbox_index above.
+    drafts: list[DraftSummary] = []
+    draft_browse_index: int = 0
     # F52 (Phase 11): "the current field being discussed" for a bare
     # "spell that" — defaults to "recipient" right after any readback
     # (recipient is always read first), updated by READ_SUBJECT/

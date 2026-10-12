@@ -14,6 +14,7 @@ Phase = Literal[
     "review",  # draft exists
     "awaiting_confirm",  # readback done, waiting for "send"
     "reading_inbox",  # navigating messages
+    "reading_drafts",  # navigating saved Gmail drafts
     "awaiting_schedule_time",  # asked what time to schedule a send for (F35)
     "awaiting_pin",  # F51 (Phase 14) — asked for the spoken PIN before a sensitive send
 ]
@@ -99,6 +100,20 @@ class InboxItem(BaseModel):
     subject: str
     snippet: str
     unread: bool = True
+
+
+class DraftSummary(BaseModel):
+    """A previously saved Gmail draft, for "read my drafts"/"send my
+    saved draft" (Phase 15). Lightweight metadata only, mirroring
+    InboxItem's shape — the draft's full body isn't needed to browse or
+    send it by id.
+    """
+
+    id: str
+    recipient_name: str = ""
+    recipient_email: str = ""
+    subject: str = ""
+    snippet: str = ""
 
 
 class ThreadContext(BaseModel):

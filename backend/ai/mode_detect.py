@@ -10,6 +10,7 @@ composition too:
                                   decide confidently either
 """
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -60,13 +61,27 @@ def check_override(transcript: str) -> Optional[tuple[Mode, str]]:
     return None
 
 
+_TRIGGER_BOUNDARY_RE = re.compile(r"^[\s,:;.]+")
+
+
 def _strip_prefix(original: str, low: str, trigger: str) -> Optional[str]:
+    """Bug fix: previously required an exact single space right after the
+    trigger phrase, so "Dictate this, I will be late" (a comma the ASR
+    inserted at the natural speech pause) never matched at all — the
+    literal words "dictate this" leaked into the composed content
+    instead of being stripped as an override. Any run of whitespace/
+    comma/colon/semicolon/period now counts as the boundary, while still
+    requiring a real word boundary (so "dictate thistle" still correctly
+    does not match "dictate this").
+    """
     if low == trigger:
         return ""
-    prefix = trigger + " "
-    if low.startswith(prefix):
-        return original.strip()[len(prefix):].strip()
-    return None
+    if not low.startswith(trigger):
+        return None
+    boundary = _TRIGGER_BOUNDARY_RE.match(low[len(trigger):])
+    if not boundary:
+        return None
+    return original.strip()[len(trigger):][boundary.end():].strip()
 
 
 def detect_mode(transcript: str) -> DetectResult:

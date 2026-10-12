@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from backend.attachments import reset_attachments_for_tests  # noqa: E402
 from backend.data import store  # noqa: E402
-from backend.gmail.fake import reset_fake_inbox_for_tests  # noqa: E402
+from backend.gmail.fake import reset_fake_drafts_for_tests, reset_fake_inbox_for_tests  # noqa: E402
 from backend.main import app  # noqa: E402
 from backend.session import _sessions  # noqa: E402
 
@@ -70,6 +70,7 @@ def _clean_state():
     _clear_attachments()
     _reseed_contacts()
     reset_fake_inbox_for_tests()
+    reset_fake_drafts_for_tests()
     reset_attachments_for_tests()
     yield
     _sessions.clear()
@@ -77,6 +78,7 @@ def _clean_state():
     _clear_attachments()
     _reseed_contacts()
     reset_fake_inbox_for_tests()
+    reset_fake_drafts_for_tests()
     reset_attachments_for_tests()
 
 

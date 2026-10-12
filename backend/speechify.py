@@ -8,7 +8,7 @@ unit-testable without spinning up FastAPI.
 import re
 from pathlib import Path
 
-from backend.models import ContactCandidate, Draft, InboxItem, SpeechSegment
+from backend.models import ContactCandidate, Draft, DraftSummary, InboxItem, SpeechSegment
 
 _MARKDOWN_CHARS = re.compile(r"[*_`#>~\[\]]")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
@@ -300,6 +300,36 @@ def build_inbox_listing(items: list[InboxItem]) -> str:
     for i, item in enumerate(items, start=1):
         lines.append(f"Message {i}. {describe_inbox_item(item)}")
     lines.append("Say next email to move through them, or a command like summarise this one.")
+    return " ".join(lines)
+
+
+def describe_draft_item(item: DraftSummary) -> str:
+    """Spoken description of a single saved draft (Phase 15) — exact
+    mirror of describe_inbox_item(), reused for both the full listing
+    and "next draft"/"previous draft" navigation.
+    """
+    who = item.recipient_name or speakable_email(item.recipient_email) or "no recipient yet"
+    subject_speech = normalize_for_speech(item.subject) or "no subject"
+    snippet_speech = normalize_for_speech(item.snippet)
+
+    parts = [f"To {who}.", f"Subject: {subject_speech}."]
+    if snippet_speech:
+        parts.append(snippet_speech)
+    return " ".join(parts)
+
+
+def build_drafts_listing(items: list[DraftSummary]) -> str:
+    """Spoken response to "read my drafts" (Phase 15) — exact mirror of
+    build_inbox_listing().
+    """
+    if not items:
+        return "You don't have any saved drafts."
+
+    count_speech = "one saved draft" if len(items) == 1 else f"{len(items)} saved drafts"
+    lines = [f"You have {count_speech}."]
+    for i, item in enumerate(items, start=1):
+        lines.append(f"Draft {i}. {describe_draft_item(item)}")
+    lines.append("Say next draft to move through them, or send to send the one you're on.")
     return " ".join(lines)
 
 

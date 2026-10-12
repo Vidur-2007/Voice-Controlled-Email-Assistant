@@ -39,9 +39,20 @@ transcript) — not substring search — so "I'll cancel my subscription"
 doesn't accidentally trigger CANCEL.
 """
 
+import re
 from typing import Literal, Optional
 
+from rapidfuzz import fuzz
+
 from backend.models import Phase
+
+# Bug fix (reported live): parse_command() did an exact dict lookup with
+# no tolerance for a trailing period/comma Chrome's SpeechRecognition
+# commonly appends at the end of a finalized utterance — "read my unread
+# mail." silently missed every _PHRASES entry. Stripped before lookup,
+# never before matching free-form trigger prefixes (match_cc_trigger
+# etc.), which only care about a leading match.
+_TRAILING_PUNCT_RE = re.compile(r"[.,!?]+$")
 
 _CC_TRIGGERS = ("add cc ", "copy in ", "cc ", "copy ")
 _BCC_TRIGGERS = ("add bcc ", "bcc ")
@@ -57,6 +68,12 @@ _SEARCH_TRIGGERS = (
     "find an email ",
     "search for ",
 )
+# Bug fix: "change recipient" needs to survive ASR mis-hearing the word
+# "recipient" itself (observed live: "change receipetant to ..."). An
+# exact-phrase trigger can't do that — see match_change_recipient()'s
+# fuzzy match against these synonyms instead.
+_CHANGE_TARGET_SYNONYMS = ("recipient", "email", "address")
+_CHANGE_TARGET_FUZZY_THRESHOLD = 65
 
 Intent = Literal[
     "SEND",
@@ -101,6 +118,10 @@ Intent = Literal[
     "RESUME_DRAFT",
     "USE_SIGNOFF",
     "READ_ATTACHMENT",
+    "READ_DRAFTS",
+    "NEXT_DRAFT",
+    "PREV_DRAFT",
+    "SEND_DRAFT",
 ]
 
 _PHRASES: dict[str, Intent] = {
@@ -162,8 +183,12 @@ _PHRASES: dict[str, Intent] = {
     "reconnect my email": "RECONNECT",
     # READ_INBOX (F38, §22)
     "read my unread mail": "READ_INBOX",
+    "read my unread mails": "READ_INBOX",
+    "read my unread emails": "READ_INBOX",
     "check my email": "READ_INBOX",
+    "check my emails": "READ_INBOX",
     "check my mail": "READ_INBOX",
+    "check my mails": "READ_INBOX",
     # NEXT_EMAIL / PREV_EMAIL (F39, §22)
     "next email": "NEXT_EMAIL",
     "next message": "NEXT_EMAIL",
@@ -240,6 +265,29 @@ _PHRASES: dict[str, Intent] = {
     "read the attachment": "READ_ATTACHMENT",
     "what's in the attachment": "READ_ATTACHMENT",
     "whats in the attachment": "READ_ATTACHMENT",
+    # READ_DRAFTS / NEXT_DRAFT / PREV_DRAFT (Phase 15) — browsing
+    # previously saved Gmail drafts, exact mirror of READ_INBOX/
+    # NEXT_EMAIL/PREV_EMAIL. "send"/"send it" (already SEND above) is
+    # reused for "send the draft I'm currently on" instead of a new
+    # phrase — see voice.py's phase-aware SEND handling.
+    "read my drafts": "READ_DRAFTS",
+    "read my saved drafts": "READ_DRAFTS",
+    "check my drafts": "READ_DRAFTS",
+    "check my saved drafts": "READ_DRAFTS",
+    "next draft": "NEXT_DRAFT",
+    "previous draft": "PREV_DRAFT",
+    # SEND_DRAFT (Phase 15) — a direct shortcut that works from anywhere,
+    # without first saying "read my drafts": sends outright if there's
+    # exactly one saved draft, otherwise asks the user to browse first
+    # (see voice.py) rather than guessing which one was meant.
+    "send my saved draft": "SEND_DRAFT",
+    "send my draft": "SEND_DRAFT",
+    "send the draft": "SEND_DRAFT",
+    "send this draft": "SEND_DRAFT",
+    # "change recipient" (bare or "... to X") is matched by
+    # match_change_recipient() instead, as a free-form trigger — it
+    # needs to tolerate ASR mis-hearing "recipient" itself, which a
+    # literal _PHRASES entry can't do. See that function's docstring.
 }
 
 # Canned instructions passed to ai/edit.py::revise() for each grammar-
@@ -272,7 +320,8 @@ def parse_command(transcript: str) -> Optional[Intent]:
     """Return the matched intent, or None if this falls through to
     language processing / phase-specific handling.
     """
-    return _PHRASES.get(transcript.strip().lower())
+    cleaned = _TRAILING_PUNCT_RE.sub("", transcript.strip()).strip().lower()
+    return _PHRASES.get(cleaned)
 
 
 def match_cc_trigger(transcript: str) -> Optional[str]:
@@ -339,6 +388,79 @@ def match_search_trigger(transcript: str) -> Optional[str]:
     return None
 
 
+def match_change_recipient(transcript: str) -> Optional[str]:
+    """Bug fix: "change recipient"/"change the recipient to X" needs to
+    survive ASR mis-hearing the word "recipient" itself — observed live,
+    twice: "change receipetant to bandaru weather@gmail.com". An exact
+    phrase (or exact-phrase prefix) can't tolerate that at all, so this
+    matches STRUCTURALLY ("change <word(s)> [to <value>]") and only
+    requires the target word(s) to be *close* to "recipient"/"email"/
+    "address" (fuzzy, not exact) — catches "receipetant", "recipiant",
+    "recipitant", etc. without needing to enumerate every misheard
+    variant, while still correctly rejecting unrelated edits like
+    "change the tone to formal" (verified: "tone" scores nowhere near
+    any of the three synonyms).
+
+    Returns "" if matched with nothing after "to" (or no "to" at all —
+    bare "change recipient"), the new value if one was given, or None
+    if this isn't a change-recipient utterance at all.
+    """
+    words = transcript.strip().split()
+    if len(words) < 2 or words[0].lower() != "change":
+        return None
+    lower_words = [w.lower().strip(",.") for w in words]
+
+    if "to" in lower_words[1:]:
+        to_index = lower_words.index("to", 1)
+        target_words = [w for w in lower_words[1:to_index] if w != "the"]
+        new_value = " ".join(words[to_index + 1 :]).strip()
+    else:
+        target_words = [w for w in lower_words[1:] if w != "the"]
+        new_value = ""
+
+    if not target_words:
+        return None
+    target_phrase = " ".join(target_words)
+    matches_target = any(
+        fuzz.ratio(target_phrase, syn) >= _CHANGE_TARGET_FUZZY_THRESHOLD
+        or any(fuzz.ratio(w, syn) >= _CHANGE_TARGET_FUZZY_THRESHOLD for w in target_words)
+        for syn in _CHANGE_TARGET_SYNONYMS
+    )
+    return new_value if matches_target else None
+
+
+# Bug fix: "reply" and "reply all" were only ever registered as bare
+# phrases, expecting the actual reply content on a SEPARATE follow-up
+# turn — but people naturally say it all in one breath ("reply tell them
+# I'll be late"). REPLY_ALL's triggers are checked first and are more
+# specific, so "reply all ..." is never swallowed by the bare "reply "
+# prefix as if "all ..." were the reply's own content.
+_REPLY_ALL_TRIGGERS = ("reply all to this ", "reply to everyone ", "reply all ")
+_REPLY_TRIGGERS = ("reply to this email ", "reply to this ", "reply ")
+
+
+def match_reply_all_trigger(transcript: str) -> Optional[str]:
+    stripped = transcript.strip()
+    low = stripped.lower()
+    for trigger in _REPLY_ALL_TRIGGERS:
+        if low.startswith(trigger):
+            content = stripped[len(trigger):].strip()
+            if content:
+                return content
+    return None
+
+
+def match_reply_trigger(transcript: str) -> Optional[str]:
+    stripped = transcript.strip()
+    low = stripped.lower()
+    for trigger in _REPLY_TRIGGERS:
+        if low.startswith(trigger):
+            content = stripped[len(trigger):].strip()
+            if content:
+                return content
+    return None
+
+
 def help_speech(phase: Phase) -> str:
     """A spoken help listing that reflects only what's usable right now (A4)."""
     if phase == "awaiting_confirm":
@@ -382,6 +504,12 @@ def help_speech(phase: Phase) -> str:
         return (
             "Say what you'd like your reply to say, or cancel to discard "
             "it and go back to your inbox."
+        )
+    if phase == "reading_drafts":
+        return (
+            "Say next draft or previous draft to move through your saved "
+            "drafts, or send to send the one you're on. Say start over to "
+            "leave your drafts."
         )
     if phase == "awaiting_schedule_time":
         return (

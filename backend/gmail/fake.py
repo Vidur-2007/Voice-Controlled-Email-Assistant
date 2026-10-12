@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 
 from backend.config import get_settings
-from backend.models import Draft, InboxItem, MailResult, ThreadContext
+from backend.models import Draft, DraftSummary, InboxItem, MailResult, ThreadContext
 
 _INVALID_RECIPIENT_MESSAGE = (
     "That address doesn't look right, so I haven't sent it. "
@@ -55,7 +55,61 @@ def fake_save_draft(draft: Draft) -> MailResult:
         return MailResult(success=False, message=_INVALID_RECIPIENT_MESSAGE)
 
     _append_line(_record(draft, "draft"))
+    _register_fake_draft(draft)
     return MailResult(success=True, message="Saved as a draft.")
+
+
+# ---------------------------------------------------------------------------
+# Fake saved drafts (Phase 15) — "read my drafts" / "send my saved draft".
+# outbox.jsonl (above) is an append-only log, fine for an audit trail but
+# useless for "fetch this one by id, then remove it once sent" — so saved
+# drafts ALSO get a small id-keyed store here, separate from that log.
+# ---------------------------------------------------------------------------
+
+_fake_drafts: dict[str, Draft] = {}
+_fake_draft_counter = 0
+
+
+def _register_fake_draft(draft: Draft) -> None:
+    global _fake_draft_counter
+    _fake_draft_counter += 1
+    _fake_drafts[f"fake-draft-{_fake_draft_counter}"] = draft.model_copy(deep=True)
+
+
+def reset_fake_drafts_for_tests() -> None:
+    global _fake_draft_counter
+    _fake_drafts.clear()
+    _fake_draft_counter = 0
+
+
+def fake_list_drafts(limit: int) -> list[DraftSummary]:
+    items = []
+    for draft_id, draft in _fake_drafts.items():
+        items.append(
+            DraftSummary(
+                id=draft_id,
+                recipient_name=draft.recipient_name,
+                recipient_email=draft.recipient,
+                subject=draft.subject,
+                snippet=draft.body[:100],
+            )
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def fake_send_draft(draft_id: str) -> MailResult:
+    draft = _fake_drafts.get(draft_id)
+    if draft is None:
+        return MailResult(success=False, message="I couldn't find that draft.")
+    if not _is_valid_recipient(draft.recipient):
+        return MailResult(success=False, message=_INVALID_RECIPIENT_MESSAGE)
+
+    _append_line(_record(draft, "send"))
+    del _fake_drafts[draft_id]
+    who = draft.recipient_name or draft.recipient
+    return MailResult(success=True, message=f"Sent to {who}.")
 
 
 # ---------------------------------------------------------------------------
